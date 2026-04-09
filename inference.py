@@ -43,27 +43,43 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Structured logging helpers
+# Structured logging helpers  (key=value format — required by OpenEnv validator)
 # ---------------------------------------------------------------------------
 
-def _emit(tag: str, payload: Dict[str, Any]) -> None:
-    """Print a structured JSON log line and flush."""
+def emit_start(task_id: str, env_name: str, model: str) -> None:
+    """[START] task=<id> env=<name> model=<model>"""
+    print(f"[START] task={task_id} env=focus_ai model={model}", flush=True)
+
+
+def emit_step(
+    step: int,
+    action: str,
+    reward: float,
+    done: bool,
+    error: str = "null",
+) -> None:
+    """[STEP] step=N action=ACTION reward=R done=true|false error=null"""
     print(
-        f"[{tag}] {json.dumps(payload, separators=(',', ':'), ensure_ascii=False)}"
+        f"[STEP] step={step} action={action} "
+        f"reward={reward:.4f} done={str(done).lower()} error={error}",
+        flush=True,
     )
-    sys.stdout.flush()
 
 
-def emit_start(payload: Dict[str, Any]) -> None:
-    _emit("START", payload)
-
-
-def emit_step(payload: Dict[str, Any]) -> None:
-    _emit("STEP", payload)
-
-
-def emit_end(payload: Dict[str, Any]) -> None:
-    _emit("END", payload)
+def emit_end(
+    task_id: str,
+    success: bool,
+    steps: int,
+    score: float,
+    rewards: List[float],
+) -> None:
+    """[END] task=<id> success=true|false steps=N score=S rewards=r1,r2,..."""
+    rewards_str = ",".join(f"{r:.4f}" for r in rewards)
+    print(
+        f"[END] task={task_id} success={str(success).lower()} "
+        f"steps={steps} score={score:.4f} rewards={rewards_str}",
+        flush=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -385,14 +401,13 @@ def run_episode(
     env = FocusEnv(difficulty=difficulty)
     obs = env.reset()
 
-    emit_start({
-        "difficulty": difficulty,
-        "agent":      "llm" if use_llm else "smart",
-        "max_steps":  max_steps,
-        "model":      config.get("model_name") if use_llm else "smart_agent",
-    })
+    model_name = config.get("model_name") if use_llm else "smart_agent"
+    task_id = difficulty  # task_id matches openenv.yaml task ids
+
+    emit_start(task_id=task_id, env_name="focus_ai", model=model_name)
 
     conversation: List[Dict[str, str]] = []
+    step_rewards: List[float] = []
     total_reward = 0.0
     final_score = None
 
@@ -404,17 +419,14 @@ def run_episode(
 
         obs, reward, done, info = env.step(action)
         total_reward += reward.reward
+        step_rewards.append(reward.reward)
 
-        emit_step({
-            "step":        step_n + 1,
-            "action":      action,
-            "reward":      reward.reward,
-            "done":        done,
-            "energy":      obs.energy,
-            "time":        obs.time,
-            "completed":   info["metrics"]["completed_tasks"],
-            "total_tasks": info["metrics"]["total_tasks"],
-        })
+        emit_step(
+            step=step_n + 1,
+            action=action,
+            reward=reward.reward,
+            done=done,
+        )
 
         if done:
             final_score = info.get("score")
@@ -429,16 +441,23 @@ def run_episode(
         f"Score {final_score} is outside (0, 1) for difficulty={difficulty}"
     )
 
-    result = {
+    success = final_score >= 0.5
+
+    emit_end(
+        task_id=task_id,
+        success=success,
+        steps=len(step_rewards),
+        score=final_score,
+        rewards=step_rewards,
+    )
+
+    return {
         "difficulty":   difficulty,
         "score":        final_score,
         "total_reward": total_reward,
         "metrics":      dict(env.metrics),
         "agent":        "llm" if use_llm else "smart",
     }
-    emit_end(result)
-
-    return result
 
 
 # ---------------------------------------------------------------------------

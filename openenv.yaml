@@ -12,24 +12,24 @@ entry_point: env:FocusEnv
 
 tasks:
   - id: easy
-    difficulty: easy
-    grader: "reward_and_tasks:grade_easy"
+    name: easy_scheduling
+    grader: "reward_and_tasks.py"
     description: >
       Morning sprint — high energy (80/100), 2 tasks with clear priority
       ordering.  A smart agent completes both on time.  Tests basic
       priority-aware scheduling.
 
   - id: medium
-    difficulty: medium
-    grader: "reward_and_tasks:grade_medium"
+    name: medium_scheduling
+    grader: "reward_and_tasks.py"
     description: >
       Afternoon crunch — medium energy (60/100), 3 tasks with mixed
       priorities and tighter deadlines.  Requires balancing energy recovery
       against deadline pressure.  Tests workload management.
 
   - id: hard
-    difficulty: hard
-    grader: "reward_and_tasks:grade_hard"
+    name: hard_scheduling
+    grader: "reward_and_tasks.py"
     description: >
       Late-day crisis — medium-low energy (55/100), 6 competing tasks
       including two critical blockers (incident + security patch) with
