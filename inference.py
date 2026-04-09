@@ -135,42 +135,153 @@ def get_runtime_config(strict_env: bool = False) -> Dict[str, Optional[str]]:
 
 
 # ---------------------------------------------------------------------------
-# LLM agent
+# LLM System Prompt  ← THE CORE PROMPT, tuned to the grader's scoring weights
 # ---------------------------------------------------------------------------
+#
+# Grader scoring weights (from reward_and_tasks.py):
+#
+#   grade_easy   → 60% task completion  + 40% on-time
+#   grade_medium → 40% completion + 35% on-time + 25% energy efficiency
+#   grade_hard   → 35% completion + 30% on-time + 20% energy + 15% priority order
+#
+# Step reward signals (from calculate_reward):
+#   ✅ Complete high-priority task          → +17  (base 15 + bonus 2)
+#   ✅ Complete medium-priority task        → +12
+#   ✅ Complete low-priority task           → +10  (base 10 - penalty 2 = 8)
+#   ✅ Finish before deadline               → +5
+#   ✅ Take break when energy is LOW        → +7   (energy delta 5 + recovery bonus 2)
+#   ✅ Start task when energy is HIGH       → +3   (energy delta)
+#   ❌ Miss a deadline                      → -10
+#   ❌ Start task when energy is LOW        → -11  (delta -8 + burnout penalty -3)
+#   ❌ Take break when energy is HIGH       → -3   (energy delta)
+#   ❌ noop at any time                     → -3
+#
+# The prompt teaches the agent to:
+#   1. Always prioritise HIGH → MEDIUM → LOW tasks
+#   2. Never use noop (strong penalty)
+#   3. Recover energy with take_break only when energy is LOW (≤ 40)
+#   4. Work when energy is HIGH or MEDIUM (> 40)
+#   5. Respect deadlines — choose task with earliest deadline first among equals
+#   6. Reply with ONLY the action string — nothing else
 
 _SYSTEM_PROMPT = """\
-You are a productivity agent managing a knowledge worker's day.
+You are FocusAI, an expert productivity scheduling agent managing a knowledge \
+worker's day in a deterministic simulation.
 
-Your goal: complete all tasks before their deadlines while managing energy \
-to avoid burnout.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+YOUR GOAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Maximise the episode score by:
+  1. Completing ALL tasks before their deadlines.
+  2. Finishing HIGH-priority tasks first.
+  3. Maintaining energy to avoid burnout penalties.
 
-At each step you receive the current state and must choose ONE action from \
-the legal_actions list. Reply with ONLY the action string, nothing else.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SCORING RULES (grader weights you must optimise for)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Easy   → 60% task completion   + 40% on-time delivery
+  Medium → 40% completion + 35% on-time + 25% energy efficiency
+  Hard   → 35% completion + 30% on-time + 20% energy + 15% priority ordering
 
-Examples:
+  This means: completing tasks on time and in priority order is ALWAYS worth more
+  than taking extra breaks or doing low-priority work first.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REWARD SIGNALS (to guide your choices)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  STRONGLY POSITIVE:
+    ✅  Complete a HIGH-priority task         → +17 points
+    ✅  Complete any task before deadline     → +5 extra points
+    ✅  take_break when energy is LOW (≤40)   → +7 points (recovery bonus)
+    ✅  start_task when energy is HIGH (>70)  → +3 energy bonus
+
+  STRONGLY NEGATIVE:
+    ❌  Miss a deadline                       → −10 points (catastrophic)
+    ❌  start_task when energy is LOW (≤40)   → −11 points (burnout risk)
+    ❌  take_break when energy is HIGH (>70)  → −3 points (wasted time)
+    ❌  noop()                                → −3 points (always penalised)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DECISION ALGORITHM — follow this order every step
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  STEP 1 — CHECK ENERGY FIRST:
+    If energy_level == "low"  (energy ≤ 40):
+        → take_break(2)          # Always recover before working. Never start a task.
+
+  STEP 2 — PICK THE BEST TASK (energy is medium or high):
+    Among all incomplete tasks visible in legal_actions:
+        a) Sort by priority:     high > medium > low
+        b) Break ties by:        earliest deadline first
+        c) Use:                  start_task('<id>') or switch_task('<id>')
+
+  STEP 3 — NO TASKS LEFT:
+    If all tasks are completed and no legal start/switch actions remain:
+        → take_break(1)          # Recover energy while waiting for episode end
+        # NEVER use noop() — it always loses 3 points with no benefit
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+LEGAL ACTIONS FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  start_task('<task_id>')          — begin a new task (requires high/medium energy)
+  switch_task('<task_id>')         — switch to a different task mid-step
+  take_break(<hours>)             — rest to recover energy (use 1–3 hours)
+  noop()                          — do nothing (AVOID — always penalised −3)
+
+  You will be given legal_actions listing exactly which actions are valid right now.
+  You MUST only choose from that list. Do NOT invent actions not in the list.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PRIORITY REFERENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  high   → Do this FIRST — worth +17 points when done before deadline
+  medium → Do this SECOND — worth +12 points
+  low    → Do this LAST — worth only +8 points (base 10 − penalty 2)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT — CRITICAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Reply with ONLY the action string. No explanation. No reasoning. No JSON.
+  No markdown. No extra words. Just the action.
+
+  ✅ CORRECT:   start_task('report')
+  ✅ CORRECT:   take_break(2)
+  ✅ CORRECT:   switch_task('incident')
+  ❌ WRONG:     "I will start the report task" → INVALID — the parser will fail
+  ❌ WRONG:     {"action": "start_task('report')"} → INVALID — no JSON
+  ❌ WRONG:     noop() → only if no other legal action exists
+
+Examples of ideal responses:
   start_task('report')
+  switch_task('pr_review')
   take_break(2)
-  switch_task('inbox')
-  noop()
 """
 
 
+# ---------------------------------------------------------------------------
+# LLM agent
+# ---------------------------------------------------------------------------
+
 def _extract_action(text: str, legal: List[str]) -> Optional[str]:
-    """Extract a valid action from LLM output."""
+    """Extract a valid action from LLM output (robust multi-strategy parser)."""
     text = text.strip()
 
     # 1. Direct exact match
     if text in legal:
         return text
 
-    # 2. Regex search for known action patterns
+    # 2. Strip markdown fences or quotes the LLM might add
+    text_clean = text.strip("`\"'")
+    if text_clean in legal:
+        return text_clean
+
+    # 3. Regex search for known action patterns inside the text
     pattern = r"(start_task|take_break|switch_task|noop)\s*\([^)]*\)"
     for match in re.finditer(pattern, text):
         candidate = match.group(0)
         if candidate in legal:
             return candidate
 
-    # 3. Partial match — first legal action whose name appears in text
+    # 4. Partial name match — first legal action whose base name appears in text
     for action in legal:
         name = action.split("(")[0]
         if name in text:
@@ -185,22 +296,48 @@ def llm_agent(
     model_name: str,
     conversation: List[Dict[str, str]],
 ) -> str:
-    """Call the LLM and return a valid action string."""
+    """
+    Call the LLM and return a valid action string.
+
+    Builds a compact, information-dense observation string so the LLM has
+    all the data it needs to apply the decision algorithm in the system prompt.
+    """
+    # Format pending tasks with priority + deadline for easy sorting by LLM
+    pending = [
+        f"  [{t.priority.upper()}] {t.id!r} — deadline hour {t.deadline}, "
+        f"duration {t.duration}h"
+        for t in observation.tasks
+        if not t.completed
+    ]
+    completed_ids = [t.id for t in observation.tasks if t.completed]
+
     obs_text = (
-        f"Time: {observation.time}h | "
-        f"Energy: {observation.energy}/100 ({observation.energy_level})\n"
-        f"Pending tasks: {[t.id for t in observation.tasks if not t.completed]}\n"
-        f"Legal actions: {observation.legal_actions}\n"
-        f"Goal: {observation.goal}"
+        f"=== CURRENT STATE ===\n"
+        f"Time        : {observation.time:.1f}h\n"
+        f"Energy      : {observation.energy}/100  [{observation.energy_level.upper()}]\n"
+        f"Active task : {observation.current_task or 'none'}\n"
+        f"Recent      : {observation.recent_actions}\n"
+        f"\nPENDING TASKS (choose from these, high priority first):\n"
+        + ("\n".join(pending) if pending else "  (all tasks completed)")
+        + f"\n\nCOMPLETED: {completed_ids}\n"
+        f"\nLEGAL ACTIONS: {observation.legal_actions}\n"
+        f"\nGOAL: {observation.goal}\n"
+        f"\nRemember: energy={observation.energy_level.upper()} → "
+        + (
+            "TAKE A BREAK FIRST (energy is low ≤ 40, starting a task costs −11 pts)"
+            if observation.energy_level == "low"
+            else "WORK ON HIGHEST PRIORITY TASK (energy is good)"
+        )
     )
+
     conversation.append({"role": "user", "content": obs_text})
 
     try:
         response = client.chat.completions.create(
             model=model_name,
             messages=[{"role": "system", "content": _SYSTEM_PROMPT}] + conversation,
-            max_tokens=64,
-            temperature=0.0,
+            max_tokens=32,       # Action strings are short — keep context tight
+            temperature=0.0,     # Deterministic — graders reward consistency
         )
         reply = response.choices[0].message.content or ""
         conversation.append({"role": "assistant", "content": reply})
@@ -209,7 +346,7 @@ def llm_agent(
         if action:
             return action
 
-        logger.warning("LLM returned no valid action — falling back to smart_agent")
+        logger.warning("LLM returned no valid action (%r) — falling back to smart_agent", reply)
     except Exception as exc:
         logger.error("LLM error: %s — falling back to smart_agent", exc)
 
@@ -226,7 +363,7 @@ def run_episode(
     config: Dict[str, Optional[str]],
 ) -> Dict[str, Any]:
     """
-    Run one episode.
+    Run one full episode.
 
     Uses the LLM if credentials are available; falls back to smart_agent.
     """
