@@ -13,6 +13,7 @@ entry_point: env:FocusEnv
 tasks:
   - id: easy
     difficulty: easy
+    grader: "reward_and_tasks:grade_easy"
     description: >
       Morning sprint — high energy (80/100), 2 tasks with clear priority
       ordering.  A smart agent completes both on time.  Tests basic
@@ -20,6 +21,7 @@ tasks:
 
   - id: medium
     difficulty: medium
+    grader: "reward_and_tasks:grade_medium"
     description: >
       Afternoon crunch — medium energy (60/100), 3 tasks with mixed
       priorities and tighter deadlines.  Requires balancing energy recovery
@@ -27,6 +29,7 @@ tasks:
 
   - id: hard
     difficulty: hard
+    grader: "reward_and_tasks:grade_hard"
     description: >
       Late-day crisis — medium-low energy (55/100), 6 competing tasks
       including two critical blockers (incident + security patch) with
