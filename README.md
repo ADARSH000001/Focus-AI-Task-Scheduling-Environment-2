@@ -141,7 +141,7 @@ An episode ends when ANY of these is true:
 | `openenv.yaml` with `entry_point: env:FocusEnv` | ✅ |
 | 3 tasks with graders returning strictly `(0, 1)` | ✅ |
 | `inference.py` with OpenAI client | ✅ |
-| Structured logs `[START]` `[STEP]` `[END]` | ✅ |
+| Structured logs `[START]` `[STEP]` `[END]` in `key=value` format | ✅ |
 | Dockerfile builds and runs | ✅ |
 | HF Space deployable | ✅ |
 
