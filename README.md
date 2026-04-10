@@ -19,13 +19,13 @@ Focus AI is an **OpenEnv-compatible RL environment** where an agent must:
 - Prioritize high-importance work
 - Recover efficiently when exhausted
 
-The environment simulates a real knowledge-worker's day — a domain with genuine utility for agent benchmarking and policy evaluation.
+The environment simulates a real knowledge-worker's day — making it directly useful for agent benchmarking, policy evaluation, and productivity research.
 
 ---
 
 ## 2. Problem Statement
 
-Knowledge workers constantly balance urgent tasks, deadlines, context switching, and cognitive fatigue. This project models that decision process as a structured environment where every action affects future productivity and wellbeing.
+Knowledge workers constantly balance urgent tasks, deadlines, context switching, and cognitive fatigue. Focus AI models that decision process as a structured RL environment where every action affects future productivity and wellbeing.
 
 ---
 
@@ -86,15 +86,20 @@ Reward is calculated per step and clamped to `[-20, +20]`.
 ### 🟢 Easy
 - 2 tasks, high starting energy (80/100)
 - `report` (high priority, deadline 12h, 1h) + `inbox` (low, 18h, 1h)
+- Scoring: 60% task completion + 40% on-time delivery
 
 ### 🟡 Medium
 - 3 tasks, medium energy (60/100)
 - `pr_review` (high, 11h, 2h) + `client_call` (medium, 14h, 2h) + `docs` (low, 18h, 1h)
+- Scoring: 40% completion + 35% on-time + 25% energy efficiency
 
 ### 🔴 Hard
 - 6 tasks, medium-low energy (55/100)
-- 2 critical blockers + 4 mixed-priority tasks
-- Requires genuine multi-step planning
+- 2 critical blockers (`incident` + `security`) + 4 mixed-priority tasks
+- Requires genuine multi-step planning under resource constraints
+- Scoring: 35% completion + 30% on-time + 20% energy + 15% priority quality
+
+> **Note:** All difficulties use randomized task generation by default (`get_random_task()`), preventing LLMs from memorizing fixed scenarios. Deterministic versions (`get_easy_task()`, etc.) are available for debugging.
 
 ---
 
@@ -118,7 +123,23 @@ safe_score(raw) = 0.01 + 0.98 × raw,    raw ∈ [0, 1]
 
 ---
 
-## 7. Episode Termination
+## 7. Agent Modes
+
+### Smart Agent (default)
+A built-in deterministic baseline. No API keys required. Follows priority + deadline ordering with energy-aware break decisions.
+
+### LLM Agent
+Uses any OpenAI-compatible API. Configured via environment variables. Falls back to smart agent automatically on API errors or invalid outputs.
+
+The LLM receives a structured system prompt covering:
+- Energy-first decision rules
+- Priority + deadline sorting strategy
+- Reward penalties to avoid
+- Hard override cases (e.g., work through low energy if deadline is imminent)
+
+---
+
+## 8. Episode Termination
 
 An episode ends when ANY of these is true:
 
@@ -127,9 +148,11 @@ An episode ends when ANY of these is true:
 3. Time reaches 24h (end of day)
 4. 5 consecutive invalid or noop steps (stagnation guard)
 
+Maximum steps per episode: **10**
+
 ---
 
-## 8. OpenEnv Compliance
+## 9. OpenEnv Compliance
 
 | Requirement | Status |
 |---|---|
@@ -147,15 +170,21 @@ An episode ends when ANY of these is true:
 
 ---
 
-## 9. How to Run
+## 10. How to Run
 
-### Local (without LLM)
+### Local — Smart Agent (no API key needed)
 ```bash
 pip install -r requirements.txt
 python inference.py
 ```
 
-### Local (with LLM)
+### Local — Single Difficulty
+```bash
+python inference.py --difficulty easy     # or medium / hard
+python inference.py --difficulty all      # runs all three (default)
+```
+
+### Local — LLM Agent
 ```bash
 pip install -r requirements.txt
 export API_BASE_URL="https://router.huggingface.co/v1"
@@ -170,14 +199,45 @@ docker build -t focus-ai .
 docker run --rm -p 7860:7860 focus-ai
 ```
 
-### Self-test
+### Self-test (env only)
 ```bash
 python env.py
 ```
 
+### With uv (recommended for reproducible installs)
+```bash
+uv sync          # installs from uv.lock — exact versions
+uv run python inference.py
+```
+
 ---
 
-## 10. API Endpoints
+## 11. Environment Variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `API_BASE_URL` | No | `https://router.huggingface.co/v1` | LLM API base URL |
+| `MODEL_NAME` | No | `meta-llama/Llama-3.1-8B-Instruct` | Model to use |
+| `HF_TOKEN` | For LLM mode | — | Hugging Face API token |
+
+> If `HF_TOKEN` is not set, the runner falls back to the smart agent silently. Use `--strict-env` to fail loudly instead.
+
+---
+
+## 12. Structured Log Format
+
+All episode output follows `key=value` format for machine parsing:
+
+```
+[START] task=easy env=focus_ai model=smart_agent
+[STEP]  step=1 action=start_task('report') reward=22.0000 done=false error=null
+[STEP]  step=2 action=start_task('inbox') reward=12.0000 done=true error=null
+[END]   task=easy success=true steps=2 score=0.9702 rewards=22.0000,12.0000
+```
+
+---
+
+## 13. API Endpoints
 
 | Method | Endpoint | Description |
 |---|---|---|
@@ -192,27 +252,45 @@ python env.py
 
 ---
 
-## 11. Project Structure
+## 14. Project Structure
 
 ```
-├── env.py                  # FocusEnv + smart_agent baseline
+├── env.py                  # FocusEnv class + smart_agent baseline
 ├── reward_and_tasks.py     # Reward function, task generators, graders, safe_score
 ├── inference.py            # Inference runner (LLM + smart agent)
 ├── models.py               # Pydantic models (Observation, Action, Reward, Task)
 ├── server/
 │   └── app.py              # FastAPI server
 ├── openenv.yaml            # OpenEnv manifest
-├── pyproject.toml           # Project metadata + scripts
+├── pyproject.toml          # Project metadata + entry points
 ├── Dockerfile              # Container definition
-├── requirements.txt        # Python dependencies
+├── requirements.txt        # Python dependencies (pip)
+├── uv.lock                 # Locked dependency tree (uv)
 └── README.md
 ```
 
 ---
 
-## 12. HF Space Deployment
+## 15. HF Space Deployment
 
 1. Create HF Space with SDK type **Docker**
 2. Upload this folder
 3. Set secrets: `HF_TOKEN`, `API_BASE_URL`, `MODEL_NAME`
 4. Verify: `GET /health` → `{"status":"healthy"}`
+
+---
+
+## 16. Scoring Output
+
+After running all difficulties, results are written to `baseline_scores.json`:
+
+```json
+{
+  "overall_score": 0.7412,
+  "difficulties": [
+    { "difficulty": "easy",   "score": 0.9702, "total_reward": 34.0 },
+    { "difficulty": "medium", "score": 0.7105, "total_reward": 21.0 },
+    { "difficulty": "hard",   "score": 0.5429, "total_reward": 12.0 }
+  ]
+}
+```

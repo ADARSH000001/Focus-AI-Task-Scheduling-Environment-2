@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "focus-ai-task-scheduler"
-version = "2.0.0"
+version = "3.0.0"
 description = "RL environment for intelligent task scheduling with energy-aware decisions, deadlines, and priority optimization."
 readme = "README.md"
 requires-python = ">=3.10"

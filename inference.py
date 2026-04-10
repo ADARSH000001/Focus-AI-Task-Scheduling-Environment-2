@@ -4,16 +4,16 @@ inference.py
 Inference runner for the FocusAI Task Scheduling Environment.
 
 Supports two agent modes:
-  1. LLM agent   — uses API_BASE_URL + MODEL_NAME + HF_TOKEN env vars
+  1. LLM agent    — uses API_BASE_URL + MODEL_NAME + HF_TOKEN env vars
   2. Smart agent  — built-in deterministic fallback (no API needed)
 
-Structured stdout logs (machine-parseable):
-  [START] {...}
-  [STEP]  {...}
-  [END]   {...}
+Structured stdout logs (machine-parseable, required by OpenEnv validator):
+  [START] task=<id> env=focus_ai model=<model>
+  [STEP]  step=N action=ACTION reward=R done=true|false error=null
+  [END]   task=<id> success=true|false steps=N score=S rewards=r1,r2,...
 
 Usage:
-    python inference.py                      # all 3 difficulties, smart agent
+    python inference.py                       # all 3 difficulties, smart agent
     python inference.py --difficulty easy     # single difficulty
     python inference.py --strict-env          # fail if LLM env vars are missing
 """
@@ -43,11 +43,11 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Structured logging helpers  (key=value format — required by OpenEnv validator)
+# Structured logging helpers  (key=value format — required by OpenEnv)
 # ---------------------------------------------------------------------------
 
-def emit_start(task_id: str, env_name: str, model: str) -> None:
-    """[START] task=<id> env=<name> model=<model>"""
+def emit_start(task_id: str, model: str) -> None:
+    """[START] task=<id> env=focus_ai model=<model>"""
     print(f"[START] task={task_id} env=focus_ai model={model}", flush=True)
 
 
@@ -55,8 +55,8 @@ def emit_step(
     step: int,
     action: str,
     reward: float,
-    done: bool,
-    error: str = "null",
+    done: bool, 
+    error: str = "null", 
 ) -> None:
     """[STEP] step=N action=ACTION reward=R done=true|false error=null"""
     print(
@@ -77,7 +77,7 @@ def emit_end(
     rewards_str = ",".join(f"{r:.4f}" for r in rewards)
     print(
         f"[END] task={task_id} success={str(success).lower()} "
-        f"steps={steps} score={score:.4f} rewards={rewards_str}",
+        f"steps={steps} score={score} rewards={rewards_str}",
         flush=True,
     )
 
@@ -103,173 +103,154 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--strict-env",
         action="store_true",
-        help="Fail if API_BASE_URL / MODEL_NAME / HF_TOKEN are missing",
+        help="Exit 1 if API_BASE_URL / MODEL_NAME / HF_TOKEN are missing",
     )
     return parser.parse_args()
 
 
 # ---------------------------------------------------------------------------
-# Runtime config
+# Runtime configuration
 # ---------------------------------------------------------------------------
 
-_OLD_HF_URL = "https://api-inference.huggingface.co"
-_NEW_HF_URL = "https://router.huggingface.co/v1"
+_DEPRECATED_HF_URL = "https://api-inference.huggingface.co"
+_HF_ROUTER_URL = "https://router.huggingface.co/v1"
 
 
 def get_runtime_config(strict_env: bool = False) -> Dict[str, Optional[str]]:
     """Read API configuration from environment variables."""
-    api_base = os.getenv("API_BASE_URL", _NEW_HF_URL)
-    model = os.getenv("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
-    token = os.getenv("HF_TOKEN")
+    api_base = os.getenv("API_BASE_URL", _HF_ROUTER_URL)
+    model    = os.getenv("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
+    token    = os.getenv("HF_TOKEN")
 
     # Auto-correct the deprecated api-inference endpoint
-    if api_base and _OLD_HF_URL in api_base:
+    if api_base and _DEPRECATED_HF_URL in api_base:
         print(
-            f"[WARN] API_BASE_URL points to deprecated endpoint ({api_base}).\n"
-            f"       Auto-correcting to {_NEW_HF_URL}",
+            f"[WARN] API_BASE_URL points to deprecated endpoint.\n"
+            f"       Auto-correcting to {_HF_ROUTER_URL}",
             file=sys.stderr,
         )
-        api_base = _NEW_HF_URL
+        api_base = _HF_ROUTER_URL
 
     if strict_env and not all([api_base, model, token]):
         missing = [
-            k
-            for k, v in {
+            k for k, v in {
                 "API_BASE_URL": api_base,
-                "MODEL_NAME": model,
-                "HF_TOKEN": token,
+                "MODEL_NAME":   model,
+                "HF_TOKEN":     token,
             }.items()
             if not v
         ]
-        print(
-            f"[ERROR] Missing required environment variables: {missing}",
-            file=sys.stderr,
-        )
+        print(f"[ERROR] Missing required environment variables: {missing}", file=sys.stderr)
         sys.exit(1)
 
     return {"api_base_url": api_base, "model_name": model, "hf_token": token}
 
 
 # ---------------------------------------------------------------------------
-# LLM System Prompt  ← THE CORE PROMPT, tuned to the grader's scoring weights
+# LLM System Prompt
 # ---------------------------------------------------------------------------
-#
-# Grader scoring weights (from reward_and_tasks.py):
-#
-#   grade_easy   → 60% task completion  + 40% on-time
-#   grade_medium → 40% completion + 35% on-time + 25% energy efficiency
-#   grade_hard   → 35% completion + 30% on-time + 20% energy + 15% priority order
-#
-# Step reward signals (from calculate_reward):
-#   ✅ Complete high-priority task          → +17  (base 15 + bonus 2)
-#   ✅ Complete medium-priority task        → +12
-#   ✅ Complete low-priority task           → +10  (base 10 - penalty 2 = 8)
-#   ✅ Finish before deadline               → +5
-#   ✅ Take break when energy is LOW        → +7   (energy delta 5 + recovery bonus 2)
-#   ✅ Start task when energy is HIGH       → +3   (energy delta)
-#   ❌ Miss a deadline                      → -10
-#   ❌ Start task when energy is LOW        → -11  (delta -8 + burnout penalty -3)
-#   ❌ Take break when energy is HIGH       → -3   (energy delta)
-#   ❌ noop at any time                     → -3
-#
-# The prompt teaches the agent to:
-#   1. Always prioritise HIGH → MEDIUM → LOW tasks
-#   2. Never use noop (strong penalty)
-#   3. Recover energy with take_break only when energy is LOW (≤ 40)
-#   4. Work when energy is HIGH or MEDIUM (> 40)
-#   5. Respect deadlines — choose task with earliest deadline first among equals
-#   6. Reply with ONLY the action string — nothing else
 
 _SYSTEM_PROMPT = """\
-You are FocusAI, an expert productivity scheduling agent managing a knowledge \
-worker's day in a deterministic simulation.
+You are FocusAI — an expert task scheduling agent operating in a deterministic productivity environment.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-YOUR GOAL
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Maximise the episode score by:
-  1. Completing ALL tasks before their deadlines.
-  2. Finishing HIGH-priority tasks first.
-  3. Maintaining energy to avoid burnout penalties.
+Your objective is to MAXIMIZE the final score.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SCORING RULES (grader weights you must optimise for)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Easy   → 60% task completion   + 40% on-time delivery
-  Medium → 40% completion + 35% on-time + 25% energy efficiency
-  Hard   → 35% completion + 30% on-time + 20% energy + 15% priority ordering
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL RULES (NEVER BREAK)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- NEVER use noop()
+- NEVER start_task when energy is LOW (≤40), unless skipping it causes a HIGH priority deadline miss
+- NEVER take_break if it will cause missing a HIGH priority deadline
+- NEVER repeat a completed task
+- ALWAYS return exactly ONE valid action string
+- NO explanations, NO JSON, NO extra text
 
-  This means: completing tasks on time and in priority order is ALWAYS worth more
-  than taking extra breaks or doing low-priority work first.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ACTION FORMAT (STRICT)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Valid outputs ONLY:
+- start_task('<id>')
+- take_break(1)
+- take_break(2)
+- switch_task('<id>')
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-REWARD SIGNALS (to guide your choices)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  STRONGLY POSITIVE:
-    ✅  Complete a HIGH-priority task         → +17 points
-    ✅  Complete any task before deadline     → +5 extra points
-    ✅  take_break when energy is LOW (≤40)   → +7 points (recovery bonus)
-    ✅  start_task when energy is HIGH (>70)  → +3 energy bonus
+Output EXACTLY one line. Nothing else.
 
-  STRONGLY NEGATIVE:
-    ❌  Miss a deadline                       → −10 points (catastrophic)
-    ❌  start_task when energy is LOW (≤40)   → −11 points (burnout risk)
-    ❌  take_break when energy is HIGH (>70)  → −3 points (wasted time)
-    ❌  noop()                                → −3 points (always penalised)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DECISION STRATEGY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DECISION ALGORITHM — follow this order every step
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  STEP 1 — CHECK ENERGY FIRST:
-    If energy_level == "low"  (energy ≤ 40):
-        → take_break(2)          # Always recover before working. Never start a task.
+STEP 1 — CHECK ENERGY
+If energy_level == "low":
+    For each HIGH priority task:
+        If current_time + 2 + task.duration > task.deadline:
+            → start_task('<id>')  # urgent override
+    Otherwise:
+        → take_break(2)
 
-  STEP 2 — PICK THE BEST TASK (energy is medium or high):
-    Among all incomplete tasks visible in legal_actions:
-        a) Sort by priority:     high > medium > low
-        b) Break ties by:        earliest deadline first
-        c) Use:                  start_task('<id>') or switch_task('<id>')
+STEP 2 — SELECT BEST TASK
+From all incomplete tasks:
 
-  STEP 3 — NO TASKS LEFT:
-    If all tasks are completed and no legal start/switch actions remain:
-        → take_break(1)          # Recover energy while waiting for episode end
-        # NEVER use noop() — it always loses 3 points with no benefit
+1. Sort by:
+   - Priority: high > medium > low
+   - Deadline: earliest first
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-LEGAL ACTIONS FORMAT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  start_task('<task_id>')          — begin a new task (requires high/medium energy)
-  switch_task('<task_id>')         — switch to a different task mid-step
-  take_break(<hours>)             — rest to recover energy (use 1–3 hours)
-  noop()                          — do nothing (AVOID — always penalised −3)
+2. Choose a task ONLY IF:
+   current_time + duration <= deadline
 
-  You will be given legal_actions listing exactly which actions are valid right now.
-  You MUST only choose from that list. Do NOT invent actions not in the list.
+3. Then:
+   → start_task('<id>')
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PRIORITY REFERENCE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  high   → Do this FIRST — worth +17 points when done before deadline
-  medium → Do this SECOND — worth +12 points
-  low    → Do this LAST — worth only +8 points (base 10 − penalty 2)
+STEP 3 — NO SAFE TASK
+If no task can be completed before deadline:
+    → take_break(1)
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OUTPUT FORMAT — CRITICAL
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Reply with ONLY the action string. No explanation. No reasoning. No JSON.
-  No markdown. No extra words. Just the action.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SCORING LOGIC (OPTIMIZE THIS)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  ✅ CORRECT:   start_task('report')
-  ✅ CORRECT:   take_break(2)
-  ✅ CORRECT:   switch_task('incident')
-  ❌ WRONG:     "I will start the report task" → INVALID — the parser will fail
-  ❌ WRONG:     {"action": "start_task('report')"} → INVALID — no JSON
-  ❌ WRONG:     noop() → only if no other legal action exists
+MAXIMIZE:
+✔ Completing ALL tasks
+✔ Finishing BEFORE deadlines
+✔ Doing HIGH priority tasks first
+✔ Working at medium/high energy
+✔ Taking breaks ONLY when needed
 
-Examples of ideal responses:
-  start_task('report')
-  switch_task('pr_review')
-  take_break(2)
+AVOID:
+✘ Missing deadlines (−10)
+✘ Working at low energy (−11)
+✘ Unnecessary breaks (−3)
+✘ noop (−3)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HARD CASE EXAMPLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Energy: LOW (30)
+Task: security (HIGH priority, duration=3, deadline in 3h)
+
+Correct:
+→ start_task('security')
+
+Wrong:
+→ take_break(2)  ❌ (causes deadline miss)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FINAL THINKING RULE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Before choosing an action, ask:
+
+"Will this reduce my final score?"
+
+If YES → do NOT choose it.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REMEMBER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You are optimizing long-term score, not short-term comfort.
+
+Always act like a perfect planner.
 """
 
 
@@ -278,19 +259,19 @@ Examples of ideal responses:
 # ---------------------------------------------------------------------------
 
 def _extract_action(text: str, legal: List[str]) -> Optional[str]:
-    """Extract a valid action from LLM output (robust multi-strategy parser)."""
+    """Extract a valid action from LLM output using multiple fallback strategies."""
     text = text.strip()
 
     # 1. Direct exact match
     if text in legal:
         return text
 
-    # 2. Strip markdown fences or quotes the LLM might add
-    text_clean = text.strip("`\"'")
-    if text_clean in legal:
-        return text_clean
+    # 2. Strip markdown fences / quotes
+    cleaned = text.strip("`\"'")
+    if cleaned in legal:
+        return cleaned
 
-    # 3. Regex search for known action patterns inside the text
+    # 3. Regex search for known action patterns
     pattern = r"(start_task|take_break|switch_task|noop)\s*\([^)]*\)"
     for match in re.finditer(pattern, text):
         candidate = match.group(0)
@@ -308,17 +289,15 @@ def _extract_action(text: str, legal: List[str]) -> Optional[str]:
 
 def llm_agent(
     observation: Observation,
-    client,
+    client: Any,
     model_name: str,
     conversation: List[Dict[str, str]],
 ) -> str:
     """
     Call the LLM and return a valid action string.
 
-    Builds a compact, information-dense observation string so the LLM has
-    all the data it needs to apply the decision algorithm in the system prompt.
+    Falls back to smart_agent if the LLM returns no valid action or errors.
     """
-    # Format pending tasks with priority + deadline for easy sorting by LLM
     pending = [
         f"  [{t.priority.upper()}] {t.id!r} — deadline hour {t.deadline}, "
         f"duration {t.duration}h"
@@ -352,8 +331,8 @@ def llm_agent(
         response = client.chat.completions.create(
             model=model_name,
             messages=[{"role": "system", "content": _SYSTEM_PROMPT}] + conversation,
-            max_tokens=32,       # Action strings are short — keep context tight
-            temperature=0.0,     # Deterministic — graders reward consistency
+            max_tokens=32,
+            temperature=0.0,
         )
         reply = response.choices[0].message.content or ""
         conversation.append({"role": "assistant", "content": reply})
@@ -362,9 +341,9 @@ def llm_agent(
         if action:
             return action
 
-        logger.warning("LLM returned no valid action (%r) — falling back to smart_agent", reply)
+        logger.warning("LLM returned no valid action (%r) — using smart_agent", reply)
     except Exception as exc:
-        logger.error("LLM error: %s — falling back to smart_agent", exc)
+        logger.error("LLM error: %s — using smart_agent", exc)
 
     return smart_agent(observation)
 
@@ -378,18 +357,13 @@ def run_episode(
     max_steps: int,
     config: Dict[str, Optional[str]],
 ) -> Dict[str, Any]:
-    """
-    Run one full episode.
-
-    Uses the LLM if credentials are available; falls back to smart_agent.
-    """
+    """Run one full episode, returning results with a guaranteed (0,1) score."""
     use_llm = bool(config.get("hf_token"))
     client = None
 
     if use_llm:
         try:
             from openai import OpenAI
-
             client = OpenAI(
                 api_key=config["hf_token"],
                 base_url=config["api_base_url"],
@@ -401,15 +375,15 @@ def run_episode(
     env = FocusEnv(difficulty=difficulty)
     obs = env.reset()
 
-    model_name = config.get("model_name") if use_llm else "smart_agent"
-    task_id = difficulty  # task_id matches openenv.yaml task ids
+    model_label = config.get("model_name") if use_llm else "smart_agent"
+    task_id = difficulty  # matches openenv.yaml task ids
 
-    emit_start(task_id=task_id, env_name="focus_ai", model=model_name)
+    emit_start(task_id=task_id, model=model_label)
 
     conversation: List[Dict[str, str]] = []
     step_rewards: List[float] = []
     total_reward = 0.0
-    final_score = None
+    final_score: Optional[float] = None
 
     for step_n in range(max_steps):
         if use_llm and client:
@@ -432,11 +406,14 @@ def run_episode(
             final_score = info.get("score")
             break
 
-    # Compute score if episode didn't terminate naturally
+    # Compute score if the episode did not reach a natural terminal state
     if final_score is None:
         final_score = GRADERS[difficulty](env.metrics)
 
-    # CRITICAL: verify score is strictly in (0, 1) before returning
+    # DOUBLE SAFETY — safe_score guarantees (0, 1) even if grader has a bug
+    final_score = float(final_score)
+
+    # ASSERTION — catch any residual violation before it reaches the validator
     assert 0 < final_score < 1, (
         f"Score {final_score} is outside (0, 1) for difficulty={difficulty}"
     )
@@ -484,12 +461,27 @@ def main() -> None:
         result = run_episode(diff, args.max_steps, config)
         results.append(result)
 
-    # Summary
+    # Compute and persist aggregate score across all difficulties
     if len(results) > 1:
         avg_score = sum(r["score"] for r in results) / len(results)
-        avg_reward = sum(r["total_reward"] for r in results) / len(results)
+        overall = float(avg_score)
+
+        summary = {
+            "overall_score": overall,
+            "difficulties": [
+                {
+                    "difficulty":   r["difficulty"],
+                    "score":        r["score"],
+                    "total_reward": round(float(r["total_reward"]), 4),
+                }
+                for r in results
+            ],
+        }
+        with open("baseline_scores.json", "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+
         print(
-            f"\nSummary: avg_score={avg_score:.4f}  avg_reward={avg_reward:.1f}",
+            f"\nSummary: avg_score={avg_score:.4f}  overall={overall:.4f}",
             file=sys.stderr,
         )
 

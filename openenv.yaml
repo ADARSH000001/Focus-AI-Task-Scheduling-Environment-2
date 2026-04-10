@@ -4,7 +4,7 @@ name: Focus AI — Cognitive Task Scheduling Environment
 description: >
   A real-world RL environment modelling a knowledge worker's day.
   An AI agent must schedule tasks, manage cognitive energy, and meet
-  deadlines while avoiding burnout.  Tasks are named real work items
+  deadlines while avoiding burnout. Tasks are named real work items
   (incident response, code review, client presentations) making the
   environment immediately useful for evaluating productivity agents.
 
@@ -13,27 +13,30 @@ entry_point: env:FocusEnv
 tasks:
   - id: easy
     name: easy_scheduling
-    grader: "reward_and_tasks.py"
+    grader: "reward_and_tasks:grade_easy"
     description: >
       Morning sprint — high energy (80/100), 2 tasks with clear priority
-      ordering.  A smart agent completes both on time.  Tests basic
+      ordering. A smart agent completes both on time. Tests basic
       priority-aware scheduling.
+      Scoring: 60% task completion + 40% on-time delivery.
 
   - id: medium
     name: medium_scheduling
-    grader: "reward_and_tasks.py"
+    grader: "reward_and_tasks:grade_medium"
     description: >
       Afternoon crunch — medium energy (60/100), 3 tasks with mixed
-      priorities and tighter deadlines.  Requires balancing energy recovery
-      against deadline pressure.  Tests workload management.
+      priorities and tighter deadlines. Requires balancing energy recovery
+      against deadline pressure. Tests workload management.
+      Scoring: 40% completion + 35% on-time + 25% energy efficiency.
 
   - id: hard
     name: hard_scheduling
-    grader: "reward_and_tasks.py"
+    grader: "reward_and_tasks:grade_hard"
     description: >
-      Late-day crisis — medium-low energy (55/100), 6 competing tasks
-      including two critical blockers (incident + security patch) with
-      tight deadlines.  Tests genuine multi-step planning under constraints.
+      Late-day crisis — medium energy (55/100), 6 competing tasks including
+      two critical blockers (incident + security patch) on tight deadlines.
+      Tests genuine multi-step planning under resource constraints.
+      Scoring: 35% completion + 30% on-time + 20% energy + 15% priority.
 
 observation_space:
   type: object
@@ -63,18 +66,18 @@ observation_space:
 action_space:
   type: string
   description: >
-    All actions are plain strings.  Return exactly one per step.
+    All actions are plain strings. Return exactly one per step.
   allowed_actions:
-    - start_task    # start_task('<id>')  — costs time + energy
-    - take_break    # take_break(<hours>) — recovers energy, costs time
-    - switch_task   # switch_task('<id>') — 0.5h context-switch cost
-    - noop          # noop()              — penalised -3 reward
+    - start_task    # start_task('<id>')   — costs time + energy
+    - take_break    # take_break(<hours>)  — recovers energy, costs time
+    - switch_task   # switch_task('<id>')  — 0.5h context-switch cost
+    - noop          # noop()               — penalised -3 reward
 
 reward:
   type: object
   range: [-20, 20]
   description: >
-    Continuous shaped reward every step.  Depends on task priority,
+    Continuous shaped reward every step. Depends on task priority,
     deadline outcome, energy level at decision time, and anti-spam penalties.
   fields:
     reward:          float
@@ -85,10 +88,11 @@ reward:
 
 scoring:
   description: >
-    Each task's final score is strictly inside the open interval (0, 1).
-    Minimum achievable score: 0.01 (nothing done).
-    Maximum achievable score: 0.99 (perfect episode).
-  formula: "safe_score(raw) = 0.01 + 0.98 * raw,  raw in [0.0, 1.0]"
+    Each task's final score is STRICTLY inside the open interval (0, 1).
+    The safe_score() function guarantees: 0.01 ≤ score ≤ 0.99.
+    Minimum achievable: 0.01 (nothing done).
+    Maximum achievable: 0.99 (perfect episode).
+  formula: "safe_score(raw) = 0.01 + 0.98 * clamp(raw, 0.0, 1.0)"
 
 max_steps: 10
 

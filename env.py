@@ -3,28 +3,28 @@ env.py
 ------
 FocusAI Task Scheduling RL Environment.
 
-Models a knowledge worker's day: the agent must complete tasks before
-their deadlines while managing cognitive energy to avoid burnout.
+Models a knowledge worker's day: the agent must complete tasks before their
+deadlines while managing cognitive energy to avoid burnout.
 
 OpenEnv interface
 -----------------
-    reset()  -> Observation
-    step()   -> (Observation, Reward, done, info)
-    state    -> Observation  (@property, read-only)
+    reset()  ->  Observation
+    step()   ->  (Observation, Reward, bool, dict)
+    state    ->  Observation  (@property, read-only)
 
 Actions
 -------
     start_task('<id>')   — work on a pending task  (costs time + energy)
     take_break(<hours>)  — recover energy          (costs time)
     switch_task('<id>')  — change active focus      (0.5h context-switch cost)
-    noop()               — do nothing              (penalised)
+    noop()               — do nothing              (always penalised -3)
 
-Episode ends when
------------------
-    - All tasks completed
-    - Energy reaches 0 (burnout)
-    - Time reaches 24h (end of day)
-    - STAGNATION_LIMIT consecutive unproductive steps
+Episode terminates when
+-----------------------
+    - All tasks are completed
+    - Energy reaches 0  (burnout)
+    - Time reaches 24h  (end of day)
+    - STAGNATION_LIMIT consecutive invalid / unproductive steps
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from reward_and_tasks import (
 
 logger = logging.getLogger(__name__)
 
-# Episode terminates after this many consecutive invalid / noop steps.
+# Episode ends after this many consecutive invalid / noop steps.
 STAGNATION_LIMIT = 5
 
 
@@ -52,7 +52,13 @@ class FocusEnv:
     """
     FocusAI Task Scheduling RL Environment.
 
-    Implements the OpenEnv interface: reset(), step(), state property.
+    Implements the OpenEnv interface: reset(), step(), and the state property.
+
+    Usage
+    -----
+        env = FocusEnv(difficulty="medium")
+        obs = env.reset()
+        obs, reward, done, info = env.step("start_task('pr_review')")
     """
 
     def __init__(self, difficulty: str = "easy") -> None:
@@ -70,9 +76,13 @@ class FocusEnv:
     # OpenEnv interface
     # ------------------------------------------------------------------
 
-    def reset(self) -> Observation:
-        """Start a fresh episode.  Returns the initial Observation."""
-        scenario = TASK_LOADERS[self.difficulty]()
+    def reset(self, seed: int | None = None) -> Observation:
+        """Start a fresh episode and return the initial Observation."""
+        from reward_and_tasks import get_random_task
+        if seed is not None:
+            scenario = get_random_task(self.difficulty, seed=seed)
+        else:
+            scenario = TASK_LOADERS[self.difficulty]()
         tasks = build_env_tasks(scenario["tasks"])
 
         self._state = {
@@ -94,7 +104,7 @@ class FocusEnv:
         }
 
         logger.info(
-            "reset | difficulty=%s tasks=%d energy=%d (%s)",
+            "reset | difficulty=%s  tasks=%d  energy=%d (%s)",
             self.difficulty, len(tasks),
             self._state["energy"], self._state["energy_level"],
         )
@@ -108,13 +118,18 @@ class FocusEnv:
         return self._build_obs()
 
     def step(
-        self, action: str,
+        self,
+        action: str,
     ) -> Tuple[Observation, Reward, bool, Dict[str, Any]]:
         """
         Apply one action and advance the environment.
 
         Returns (observation, reward, done, info).
-        info contains 'metrics'; 'score' is set when done=True.
+        info always contains 'metrics'; 'score' is set when done=True.
+
+        Invalid actions receive a flat -3 reward without mutating state.
+        calculate_reward() is never called for invalid actions — this
+        prevents energy-delta shaping from stacking with the penalty.
         """
         if self._state is None:
             raise RuntimeError("Call reset() before step().")
@@ -128,23 +143,23 @@ class FocusEnv:
             )
 
         logger.debug(
-            "step | action=%r energy=%d time=%.1f",
+            "step | action=%r  energy=%d  time=%.1f",
             action, self._state["energy"], self._state["time"],
         )
 
         name, args = self._parse_action(action)
 
-        # ---- Invalid parse -----------------------------------------------
+        # ---- Unparseable action ------------------------------------------
         if name == "invalid":
             logger.warning("step | unparseable action: %r", action)
             return self._penalise(f"Unparseable action: {action!r}")
 
-        # Snapshot energy level BEFORE state mutation
+        # Snapshot energy BEFORE state mutation (used for reward shaping)
         energy_before = self._state["energy_level"]
 
-        # ---- Dispatch ----------------------------------------------------
         self.history.append(action)
 
+        # ---- Dispatch ----------------------------------------------------
         if name == "start_task":
             result = self._do_start_task(args[0]) if args else {"invalid": True}
         elif name == "take_break":
@@ -156,12 +171,12 @@ class FocusEnv:
         else:
             result = {"invalid": True}
 
-        # Keep energy_level in sync with numeric value
+        # Keep energy_level string in sync with numeric value
         self._state["energy_level"] = numeric_to_level(self._state["energy"])
 
-        # ---- Invalid result ----------------------------------------------
+        # ---- Invalid result (e.g. unknown task id) -----------------------
         if result.get("invalid"):
-            logger.warning("step | invalid result for %r", action)
+            logger.warning("step | invalid result for action %r", action)
             return self._penalise(f"Invalid action: {action!r}")
 
         # ---- Stagnation counter ------------------------------------------
@@ -170,15 +185,16 @@ class FocusEnv:
         else:
             self._stagnation = 0
 
-        # ---- Reward ------------------------------------------------------
+        # ---- Reward (only for valid, state-mutating actions) -------------
         reward_value = calculate_reward(
             {"energy": energy_before}, action, result,
         )
 
+        # Extra burnout penalty if energy is now depleted
         if self._state["energy"] <= 0:
             reward_value = max(-20.0, reward_value - 10.0)
 
-        # ---- Metrics -----------------------------------------------------
+        # ---- Metrics update ----------------------------------------------
         self.metrics["total_steps"] += 1
 
         if result.get("task_completed"):
@@ -207,10 +223,10 @@ class FocusEnv:
         info: Dict[str, Any] = {"metrics": dict(self.metrics), "score": None}
         if done:
             info["score"] = GRADERS[self.difficulty](self.metrics)
-            logger.info("step | final score=%.6f", info["score"])
+            logger.info("step | episode done  score=%.6f", info["score"])
 
         logger.debug(
-            "step | reward=%+.1f done=%s time=%.1fh energy=%d (%s)",
+            "step | reward=%+.1f  done=%s  time=%.1fh  energy=%d (%s)",
             reward_value, done,
             self._state["time"], self._state["energy"],
             self._state["energy_level"],
@@ -218,34 +234,43 @@ class FocusEnv:
         return obs, reward_obj, done, info
 
     # ------------------------------------------------------------------
-    # Done condition (single authoritative location)
+    # Done condition  (single authoritative location)
     # ------------------------------------------------------------------
 
     def _is_done(self) -> bool:
         if self._state is None:
             return False
         if all(t["completed"] for t in self._state["tasks"]):
+            logger.debug("done | all tasks completed")
             return True
         if self._state["energy"] <= 0:
+            logger.warning("done | burnout — energy depleted")
             return True
         if self._state["time"] >= 24.0:
+            logger.debug("done | end of day reached")
             return True
         if self._stagnation >= STAGNATION_LIMIT:
+            logger.warning("done | stagnation limit %d reached", STAGNATION_LIMIT)
             return True
         return False
 
     # ------------------------------------------------------------------
-    # Penalty helper
+    # Penalty helper  (flat -3, no calculate_reward call)
     # ------------------------------------------------------------------
 
-    def _penalise(self, reason: str):
-        """Flat -3 reward for invalid actions; episode may end via stagnation."""
+    def _penalise(self, reason: str) -> Tuple[Observation, Reward, bool, Dict[str, Any]]:
+        """
+        Handle invalid actions.
+
+        Applies a flat -3 reward without mutating environment state.
+        Increments the stagnation counter so repeated invalid actions
+        eventually terminate the episode.
+        """
         self._stagnation += 1
         self.metrics["total_steps"] += 1
 
         done = self._is_done()
         obs = self._build_obs()
-        reward_obj = Reward(reward=-3.0)
         info: Dict[str, Any] = {
             "metrics": dict(self.metrics),
             "score":   None,
@@ -253,7 +278,8 @@ class FocusEnv:
         }
         if done:
             info["score"] = GRADERS[self.difficulty](self.metrics)
-        return obs, reward_obj, done, info
+
+        return obs, Reward(reward=-3.0), done, info
 
     # ------------------------------------------------------------------
     # Action implementations
@@ -265,8 +291,8 @@ class FocusEnv:
                 if task["completed"]:
                     return {"invalid": True}
                 self._state["current_task"] = task_id
-                self._state["time"] = min(24.0, self._state["time"] + task["duration"])
-                self._state["energy"] = max(0, self._state["energy"] - task["duration"] * 10)
+                self._state["time"]   = min(24.0, self._state["time"] + task["duration"])
+                self._state["energy"] = max(0,    self._state["energy"] - task["duration"] * 10)
                 task["completed"] = True
                 on_time = self._state["time"] <= task["deadline"]
                 return {
@@ -281,7 +307,8 @@ class FocusEnv:
         if hours <= 0:
             return {"invalid": True}
         self._state["energy"] = min(100, self._state["energy"] + hours * 10)
-        self._state["time"] = min(24.0, self._state["time"] + hours)
+        self._state["time"]   = min(24.0, self._state["time"] + hours)
+        logger.debug("take_break | %dh  energy→%d", hours, self._state["energy"])
         return self._empty_result()
 
     def _do_switch_task(self, task_id: str) -> dict:
@@ -315,9 +342,10 @@ class FocusEnv:
         Parse an action string into (name, args).
 
         Examples:
-            "start_task('report')"  → ("start_task", ["report"])
-            "take_break(2)"         → ("take_break", ["2"])
-            "noop()"                → ("noop", [])
+            "start_task('report')"  →  ("start_task", ["report"])
+            "take_break(2)"         →  ("take_break", ["2"])
+            "noop()"                →  ("noop", [])
+            "garbage"               →  ("invalid", [])
         """
         try:
             action = action.strip()
@@ -334,7 +362,7 @@ class FocusEnv:
             return "invalid", []
 
     def _build_legal_actions(self) -> list:
-        """Dynamically compute valid actions for the current state."""
+        """Dynamically compute the list of valid actions for the current state."""
         actions = []
         pending = [t for t in self._state["tasks"] if not t["completed"]]
 
@@ -375,7 +403,7 @@ class FocusEnv:
         advice = {
             "high":   "Energy HIGH — ideal for difficult tasks.",
             "medium": "Energy MEDIUM — manageable, consider task order.",
-            "low":    "Energy LOW — burnout risk. Consider a short break first.",
+            "low":    "Energy LOW — burnout risk! Take a short break first.",
         }[level]
 
         lines = []
@@ -412,63 +440,133 @@ class FocusEnv:
 
 
 # ---------------------------------------------------------------------------
-# Smart baseline agent (deterministic, no LLM needed)
+# Smart baseline agent  (deterministic, no LLM required)
 # ---------------------------------------------------------------------------
 
-def smart_agent(observation: Observation) -> str:
-    """
-    Energy-aware, deadline-aware, priority-aware deterministic baseline.
-
-    Strategy:
-      1. Critical energy (< 30) → take_break(2) immediately.
-      2. Sort pending by priority (high first), then deadline, then duration.
-      3. For each candidate: check feasibility (time + energy).
-      4. Fallback: attempt the most important task regardless.
-    """
+def smart_agent(observation):
     energy = observation.energy
+    time = observation.time
 
     pending = [t for t in observation.tasks if not t.completed]
+
     if not pending:
         return "noop()"
 
+    # Priority weights
+    pri = {"high": 3, "medium": 2, "low": 1}
+
+    # -------------------------------
+    # STEP 1 — TASK SCORING
+    # -------------------------------
+    def score_task(t):
+        slack = t.deadline - time - t.duration
+
+        # Urgency (less slack = more important)
+        urgency_score = max(0, 10 - slack)
+
+        # Priority weight
+        priority_score = pri[t.priority] * 15
+
+        # Energy feasibility
+        energy_penalty = 0
+        if energy < t.duration * 10:
+            energy_penalty = -20
+
+        # Deadline violation penalty
+        deadline_penalty = 0
+        if time + t.duration > t.deadline:
+            deadline_penalty = -50
+
+        return (
+            priority_score
+            + urgency_score
+            + energy_penalty
+            + deadline_penalty
+        )
+
+    tasks = sorted(pending, key=lambda t: -score_task(t))
+
+    # -------------------------------
+    # STEP 2 — CRITICAL TASK OVERRIDE
+    # -------------------------------
+    for t in tasks:
+        if t.priority == "high":
+            # If delaying this task risks missing it, do it now
+            if time + t.duration >= t.deadline:
+                return f"start_task('{t.id}')"
+
+    # -------------------------------
+    # STEP 3 — ENERGY MANAGEMENT
+    # -------------------------------
     if energy < 30:
+        for t in tasks:
+            if t.priority == "high":
+                if time + 2 + t.duration > t.deadline:
+                    return f"start_task('{t.id}')"
         return "take_break(2)"
 
-    level = observation.energy_level
-    pri = {"high": 3, "medium": 2, "low": 1}
-    candidates = sorted(
-        pending,
-        key=lambda t: (
-            -pri.get(t.priority, 0),
-            t.deadline,
-            t.duration if level in ("medium", "low") else 0,
-        ),
-    )
+    # -------------------------------
+    # STEP 4 — LOOKAHEAD FILTER
+    # -------------------------------
+    def safe_to_do(task):
+        future_time = time + task.duration
 
-    for task in candidates:
-        if (observation.time + task.duration) > task.deadline:
-            continue
-        if energy >= task.duration * 10:
-            return f"start_task('{task.id}')"
-        else:
-            needed = -(-((task.duration * 10) - energy) // 10)
-            return f"take_break({needed})"
+        for other in tasks:
+            if other.id == task.id:
+                continue
 
-    # Fallback — best task regardless of deadline feasibility
-    best = candidates[0]
-    if energy < best.duration * 10:
-        needed = -(-((best.duration * 10) - energy) // 10)
+            if future_time + other.duration > other.deadline:
+                if other.priority == "high":
+                    return False
+
+        return True
+
+    # -------------------------------
+    # STEP 5 — PICK BEST SAFE TASK
+    # -------------------------------
+    for t in tasks:
+        if time + t.duration <= t.deadline:
+            if energy >= t.duration * 10:
+                if safe_to_do(t):
+                    return f"start_task('{t.id}')"
+
+    # -------------------------------
+    # STEP 6 — SECOND PASS
+    # -------------------------------
+    for t in tasks:
+        if time + t.duration <= t.deadline:
+            if energy >= t.duration * 10:
+                return f"start_task('{t.id}')"
+
+    # -------------------------------
+    # STEP 7 — SMART BREAK
+    # -------------------------------
+    best = tasks[0]
+    needed_energy = best.duration * 10
+
+    if energy < needed_energy:
+        needed = (needed_energy - energy + 9) // 10
+        needed = max(1, min(2, needed))
+
+        for t in tasks:
+            if t.priority == "high":
+                if time + needed + t.duration > t.deadline:
+                    return f"start_task('{t.id}')"
+
         return f"take_break({needed})"
-    return f"start_task('{best.id}')"
 
-
-# ---------------------------------------------------------------------------
+    # -------------------------------
+    # STEP 8 — LAST RESORT
+    # -------------------------------
+    return f"start_task('{best.id}')"# ---------------------------------------------------------------------------
 # Quick self-test
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import sys
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
 
+    all_passed = True
     for diff in ("easy", "medium", "hard"):
         print(f"\n{'='*60}")
         print(f"  {diff.upper()}")
@@ -477,7 +575,9 @@ if __name__ == "__main__":
         env = FocusEnv(difficulty=diff)
         obs = env.reset()
         print(env.get_observation_text())
+        _ = env.state  # verify @property works
 
+        score = None
         for step_n in range(20):
             action = smart_agent(obs)
             obs, rew, done, info = env.step(action)
@@ -488,7 +588,12 @@ if __name__ == "__main__":
             if done:
                 score = info["score"]
                 print(f"\n  Score ({diff}): {score}")
-                assert 0 < score < 1, f"Score out of range: {score}"
+                if not (0 < score < 1):
+                    print(f"  ❌ SCORE OUT OF RANGE: {score}")
+                    all_passed = False
+                else:
+                    print(f"  ✓  score strictly in (0, 1)")
                 break
 
-    print("\nAll scores in (0, 1). ✓")
+    print("\n" + ("✓  All scores in (0, 1)." if all_passed else "❌  FAILURES DETECTED."))
+    sys.exit(0 if all_passed else 1)
