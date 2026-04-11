@@ -38,6 +38,11 @@ from reward_and_tasks import GRADERS, safe_score
 
 MAX_STEPS = 10
 ALLOWED_ACTIONS = {"start_task", "take_break", "switch_task", "noop"}
+_SUCCESS_THRESHOLD = {
+    "easy":   0.70,
+    "medium": 0.55,
+    "hard":   0.40,
+}
 
 logger = logging.getLogger(__name__)
 
@@ -427,7 +432,7 @@ def run_episode(
         f"Score {final_score} is outside (0, 1) for difficulty={difficulty}"
     )
 
-    success = final_score >= 0.5
+    success = final_score >= _SUCCESS_THRESHOLD.get(difficulty, 0.5)
 
     emit_end(
         task_id=task_id,
@@ -472,8 +477,20 @@ def main() -> None:
 
     # Compute and persist aggregate score across all difficulties
     if len(results) > 1:
-        avg_score = sum(r["score"] for r in results) / len(results)
-        overall = float(avg_score)
+        from reward_and_tasks import grade_performance
+
+        combined_metrics = {
+            key: sum(r["metrics"].get(key, 0) for r in results)
+            for key in [
+                "completed_tasks",
+                "total_tasks",
+                "on_time",
+                "good_energy_usage",
+                "total_steps",
+                "high_priority_choices",
+            ]
+        }
+        overall = float(grade_performance(combined_metrics))
 
         summary = {
             "overall_score": overall,
@@ -489,10 +506,7 @@ def main() -> None:
         with open("baseline_scores.json", "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2)
 
-        print(
-            f"\nSummary: avg_score={avg_score:.4f}  overall={overall:.4f}",
-            file=sys.stderr,
-        )
+        print(f"\nSummary: overall_score={overall:.4f}", file=sys.stderr)
 
 
 if __name__ == "__main__":
