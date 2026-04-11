@@ -218,7 +218,7 @@ MAXIMIZE:
 
 AVOID:
 ✘ Missing deadlines (−10)
-✘ Working at low energy (−11)
+✘ Working at low energy (−5)
 ✘ Unnecessary breaks (−3)
 ✘ noop (−3)
 
@@ -298,31 +298,28 @@ def llm_agent(
 
     Falls back to smart_agent if the LLM returns no valid action or errors.
     """
-    pending = [
-        f"  [{t.priority.upper()}] {t.id!r} — deadline hour {t.deadline}, "
-        f"duration {t.duration}h"
-        for t in observation.tasks
-        if not t.completed
-    ]
-    completed_ids = [t.id for t in observation.tasks if t.completed]
+    completed_ids  = [t.id for t in observation.tasks if t.completed]
+    pending_tasks  = [t for t in observation.tasks if not t.completed]
+
+    pending_detail = "\n".join(
+        f"  - {t.id}: priority={t.priority} deadline={t.deadline}h duration={t.duration}h"
+        for t in pending_tasks
+    ) or "  (all tasks completed)"
 
     obs_text = (
-        f"=== CURRENT STATE ===\n"
-        f"Time        : {observation.time:.1f}h\n"
-        f"Energy      : {observation.energy}/100  [{observation.energy_level.upper()}]\n"
-        f"Active task : {observation.current_task or 'none'}\n"
-        f"Recent      : {observation.recent_actions}\n"
-        f"\nPENDING TASKS (choose from these, high priority first):\n"
-        + ("\n".join(pending) if pending else "  (all tasks completed)")
-        + f"\n\nCOMPLETED: {completed_ids}\n"
-        f"\nLEGAL ACTIONS: {observation.legal_actions}\n"
-        f"\nGOAL: {observation.goal}\n"
-        f"\nRemember: energy={observation.energy_level.upper()} → "
-        + (
-            "TAKE A BREAK FIRST (energy is low ≤ 40, starting a task costs −11 pts)"
-            if observation.energy_level == "low"
-            else "WORK ON HIGHEST PRIORITY TASK (energy is good)"
-        )
+        "You are an RL agent. Return ONE action string, nothing else.\n\n"
+        "RULES:\n"
+        "- NEVER call start_task on a task in the COMPLETED list\n"
+        "- If energy < 30, take_break(2) first unless a HIGH priority deadline will be missed\n"
+        "- Choose the highest priority pending task within its deadline\n\n"
+        f"Time: {observation.time:.1f}h | Energy: {observation.energy}/100 "
+        f"({observation.energy_level.upper()})\n\n"
+        f"COMPLETED (forbidden — do NOT start_task on these):\n"
+        f"  {completed_ids if completed_ids else '(none)'}\n\n"
+        f"PENDING (choose from these):\n{pending_detail}\n\n"
+        f"VALID ACTIONS RIGHT NOW:\n"
+        + "\n".join(f"  {a}" for a in observation.legal_actions)
+        + "\n\nYour action:"
     )
 
     conversation.append({"role": "user", "content": obs_text})
@@ -404,6 +401,18 @@ def run_episode(
 
         if done:
             final_score = info.get("score")
+            # IMP 8 — surface termination reason so evaluators can diagnose agent behaviour
+            termination_reason = info.get("error", "natural")
+            if env._stagnation >= 5:
+                termination_reason = "stagnation"
+                logger.warning(
+                    "[END] Stagnation termination at step %d — agent repeated invalid actions",
+                    step_n + 1,
+                )
+                print(
+                    f"[END] task={task_id} termination_reason=stagnation step={step_n + 1}",
+                    flush=True,
+                )
             break
 
     # Compute score if the episode did not reach a natural terminal state

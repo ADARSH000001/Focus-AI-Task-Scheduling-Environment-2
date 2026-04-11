@@ -38,6 +38,10 @@ app = FastAPI(
     description="OpenEnv-compatible RL environment for AI task scheduling.",
 )
 
+# NOTE: Single global env instance. Not thread-safe by design.
+# For production, replace with per-session env management (e.g. dict keyed by session_id
+# with a threading.Lock() around all mutations in /step and /reset).
+# Acceptable for hackathon single-agent evaluation.
 _env: Optional[FocusEnv] = None
 
 
@@ -127,8 +131,9 @@ def reset(request: Optional[ResetRequest] = None) -> Dict[str, Any]:
     _env = FocusEnv(difficulty=payload.difficulty)
     obs = _env.reset()
     return {
-        "difficulty":  payload.difficulty,
-        "observation": _to_dict(obs),
+        "difficulty":        payload.difficulty,
+        "observation":       _to_dict(obs),
+        "observation_text":  _env.get_observation_text(),
     }
 
 
@@ -154,9 +159,10 @@ def step(request: StepRequest) -> Dict[str, Any]:
 def state() -> Dict[str, Any]:
     env = _require_env()
     return {
-        "difficulty":  env.difficulty,
-        "observation": _to_dict(env.state),
-        "metrics":     dict(env.metrics),
+        "difficulty":        env.difficulty,
+        "observation":       _to_dict(env.state),
+        "observation_text":  env.get_observation_text(),
+        "metrics":           dict(env.metrics),
     }
 
 
@@ -209,6 +215,49 @@ def validate() -> Dict[str, Any]:
         "checks":   checks,
         "env_name": "focus-ai-env",
         "version":  "2.0.0",
+    }
+
+
+@app.get("/score/{difficulty}")
+def score_difficulty(difficulty: str) -> Dict[str, Any]:
+    """
+    Run a complete smart_agent episode for the given difficulty and return
+    the final score.  Useful for judges to quickly benchmark the env without
+    running inference.py.
+
+    Score is ALWAYS strictly inside (0, 1) — guaranteed by safe_score().
+    """
+    if difficulty not in GRADERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"difficulty must be one of {list(GRADERS)}",
+        )
+
+    from env import smart_agent  # local import to avoid circular at module level
+
+    bench_env = FocusEnv(difficulty=difficulty)
+    obs = bench_env.reset()
+
+    step_rewards = []
+    final_score = None
+
+    for _ in range(15):
+        action = smart_agent(obs)
+        obs, reward, done, info = bench_env.step(action)
+        step_rewards.append(reward.reward)
+        if done:
+            final_score = info.get("score")
+            break
+
+    if final_score is None:
+        final_score = GRADERS[difficulty](bench_env.metrics)
+
+    return {
+        "difficulty":    difficulty,
+        "score":         float(final_score),
+        "total_reward":  round(float(sum(step_rewards)), 4),
+        "steps":         len(step_rewards),
+        "metrics":       dict(bench_env.metrics),
     }
 
 

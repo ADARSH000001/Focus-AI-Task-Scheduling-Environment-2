@@ -406,36 +406,50 @@ class FocusEnv:
             "low":    "Energy LOW — burnout risk! Take a short break first.",
         }[level]
 
-        lines = []
-        for t in self._state["tasks"]:
-            if t["completed"]:
-                lines.append(f"  [DONE] {t['id']:14s}  {t['name']}")
-            else:
-                time_left = t["deadline"] - time
-                urgency = "⚠ URGENT" if time_left <= t["duration"] + 1 else "OK"
-                lines.append(
-                    f"  [TODO] {t['id']:14s}  {t['name']}\n"
-                    f"           priority={t['priority']:6s}  "
-                    f"deadline={t['deadline']}h  "
-                    f"duration={t['duration']}h  "
-                    f"time_left={time_left:.1f}h  {urgency}"
-                )
+        completed_tasks = [t for t in self._state["tasks"] if t["completed"]]
+        pending_tasks   = [t for t in self._state["tasks"] if not t["completed"]]
+
+        completed_lines = []
+        for t in completed_tasks:
+            completed_lines.append(f"  [DONE] {t['id']}")
+
+        pending_lines = []
+        for t in pending_tasks:
+            time_left = t["deadline"] - time
+            urgency = "⚠ URGENT" if time_left <= t["duration"] + 1 else "OK"
+            pending_lines.append(
+                f"  [TODO] {t['id']:14s}  {t['name']}\n"
+                f"           priority={t['priority']:6s}  "
+                f"deadline={t['deadline']}h  "
+                f"duration={t['duration']}h  "
+                f"time_left={time_left:.1f}h  {urgency}"
+            )
 
         history_str = ", ".join(self.history[-3:]) or "none"
+        legal = self._build_legal_actions()
+
+        completed_section = (
+            "\nCOMPLETED TASKS (DO NOT REPEAT):\n"
+            + ("\n".join(completed_lines) if completed_lines else "  (none yet)")
+        )
+        pending_section = (
+            "\nPENDING TASKS:\n"
+            + ("\n".join(pending_lines) if pending_lines else "  (all done!)")
+        )
 
         return (
             f"=== FOCUS AI — TASK SCHEDULER ===\n"
             f"Time    : {time}h / 24h\n"
             f"Energy  : {energy}/100 ({level.upper()})\n"
             f"Advice  : {advice}\n"
-            f"Pending : {sum(1 for t in self._state['tasks'] if not t['completed'])}"
-            f"/{len(self._state['tasks'])} tasks\n\n"
-            f"TASKS:\n" + "\n".join(lines) + "\n\n"
+            f"Pending : {len(pending_tasks)}/{len(self._state['tasks'])} tasks\n"
+            + completed_section + "\n"
+            + "WARNING: Calling start_task on a DONE task wastes your step and counts against you.\n"
+            + pending_section + "\n\n"
             f"Recent actions : {history_str}\n\n"
-            f"GOAL: Complete all tasks before their deadlines.\n"
-            f"VALID ACTIONS: start_task('<id>') | take_break(<hours>) | "
-            f"switch_task('<id>') | noop()\n"
-            f"NOTE: Use exact task IDs above. Do NOT repeat a [DONE] task."
+            f"VALID ACTIONS RIGHT NOW:\n"
+            + "\n".join(f"  {a}" for a in legal) + "\n\n"
+            f"GOAL: Complete all pending tasks before their deadlines.\n"
         )
 
 

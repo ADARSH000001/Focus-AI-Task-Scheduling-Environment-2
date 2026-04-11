@@ -94,7 +94,23 @@ TASK_POOL = [
 # ---------------------------------------------------------------------------
 
 def get_random_task(difficulty: str, seed: int | None = None) -> dict:
-    """Generate a randomized scenario. Accepts optional seed for reproducibility."""
+    """
+    Generate a randomized task scenario for the given difficulty.
+
+    Parameters
+    ----------
+    difficulty : str
+        One of 'easy', 'medium', 'hard'.
+    seed : int or None
+        - None (default): truly random each call — good for training so the
+          agent cannot memorise a fixed scenario.
+        - Fixed integer (e.g. seed=42): deterministic output — use this in
+          evaluation / debugging to reproduce an exact episode.
+
+    Returns
+    -------
+    dict with keys: energy, energy_level, tasks
+    """
     rng = random.Random(seed)
 
     config = {
@@ -102,6 +118,11 @@ def get_random_task(difficulty: str, seed: int | None = None) -> dict:
         "medium": {"n": 3, "energy": 60, "deadline_range": (10, 18)},
         "hard":   {"n": 6, "energy": 55, "deadline_range": (10, 16)},
     }[difficulty]
+
+    assert len(TASK_POOL) >= config["n"], (
+        f"TASK_POOL too small for difficulty={difficulty!r}: "
+        f"need {config['n']} tasks but pool only has {len(TASK_POOL)}"
+    )
 
     selected = rng.sample(TASK_POOL, config["n"])
     tasks = []
@@ -111,7 +132,7 @@ def get_random_task(difficulty: str, seed: int | None = None) -> dict:
         duration = rng.randint(1, 2 if difficulty == "easy" else 3)
         deadline = rng.randint(*config["deadline_range"])
         tasks.append({
-            "id":         f"{t['id']}_{rng.randint(100, 999)}",
+            "id":         t["id"],
             "name":       t["name"],
             "priority":   t["priority"],
             "deadline":   max(current_time + duration, deadline),
@@ -155,8 +176,8 @@ def calculate_reward(state: dict, action: str, result: dict) -> float:
             elif priority == "low":
                 reward -= 2
 
-        if result.get("before_deadline"):
-            reward += 2
+        # NOTE: before_deadline bonus is handled once below (+5).
+        # Do NOT add a second bonus here.
 
     if result.get("before_deadline"):
         reward += 5
@@ -164,16 +185,12 @@ def calculate_reward(state: dict, action: str, result: dict) -> float:
         reward -= 10
 
     if action.startswith("start_task"):
-        energy_delta = {"high": 3, "medium": 1, "low": -8}.get(energy, 0)
+        energy_delta = {"high": 3, "medium": 1, "low": -5}.get(energy, 0)
         reward += energy_delta
-        if energy == "low":
-            reward -= 3
 
     elif action.startswith("take_break"):
-        energy_delta = {"low": 5, "medium": 1, "high": -3}.get(energy, 0)
+        energy_delta = {"low": 4, "medium": 1, "high": -3}.get(energy, 0)
         reward += energy_delta
-        if energy == "low":
-            reward += 2
 
     if action.startswith("noop"):
         reward -= 3
