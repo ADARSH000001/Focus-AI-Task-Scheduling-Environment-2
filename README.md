@@ -143,12 +143,18 @@ Uses any OpenAI-compatible API. Configured via environment variables. Falls back
 
 > **Important:** Use `--strict-env` if you actually intend to test an LLM. Without it, a missing or wrong `HF_TOKEN` causes a silent fallback to the smart agent — you will get smart agent scores and think your LLM performed well.
 
+**Fallback behaviour on API failure:**
+- If the LLM API raises an exception (e.g. expired token, network error), exactly **one** error is logged on the step it fails.
+- `llm_failed` is set to `True` and the episode silently continues with the smart agent for all remaining steps — no repeated error spam.
+- The `model` label in `[END]` changes to `<model_name>→smart_agent` to make the switch visible in logs.
+- If the LLM responds successfully but returns an unparseable or illegal action, the smart agent handles that single step and the LLM is retried on the next step (not a permanent fallback).
+
 The LLM receives a structured system prompt covering:
 - Energy-first decision rules
 - Priority + deadline sorting strategy
 - Reward penalties to avoid
 - Hard override cases (e.g., work through low energy if deadline is imminent)
-- A sliding conversation window (last 12 messages) to stay within small-model context limits
+- A sliding conversation window (last 6 turn-pairs / 12 messages) enforced both inside `llm_agent()` and at the top of each step loop in `run_episode()`, to stay within small-model context limits
 
 ---
 
@@ -252,12 +258,34 @@ uv run python inference.py
 
 All episode output follows `key=value` format for machine parsing. All reward values are clamped to `[-20, +20]`.
 
+**Smart agent (no LLM token):**
 ```
 [START] task=easy env=focus_ai model=smart_agent
 [STEP]  step=1 action=start_task('report') reward=20.0000 done=false error=null
 [STEP]  step=2 action=start_task('inbox') reward=12.0000 done=true error=null
 [END]   task=easy success=true steps=2 score=0.990 rewards=20.0000,12.0000
 ```
+
+**LLM agent running cleanly:**
+```
+[START] task=medium env=focus_ai model=meta-llama/Llama-3.1-8B-Instruct
+[STEP]  step=1 action=start_task('report') reward=20.0000 done=false error=null
+...
+[END]   task=medium success=true steps=5 score=0.875 rewards=...
+```
+
+**LLM token expires mid-episode (exactly one error, then silent fallback):**
+```
+[START] task=hard env=focus_ai model=meta-llama/Llama-3.1-8B-Instruct
+[STEP]  step=1 action=start_task('report') reward=17.0000 done=false error=null
+[STEP]  step=2 action=take_break(1) reward=4.0000 done=false error=null
+ERROR   LLM error: 401 Unauthorized — switching episode to smart_agent
+[STEP]  step=3 action=start_task('inbox') reward=12.0000 done=false error=null
+...
+[END]   task=hard success=false steps=10 score=0.431 model=meta-llama/Llama-3.1-8B-Instruct→smart_agent rewards=...
+```
+
+> The `→smart_agent` suffix in `model=` makes it immediately visible in logs that an LLM fallback occurred and at which episode it happened.
 
 Stagnation termination also emits a dedicated line:
 ```
