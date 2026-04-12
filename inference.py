@@ -367,7 +367,8 @@ def llm_agent(
 
         logger.warning("LLM returned no valid action (%r) — using smart_agent", reply)
     except Exception as exc:
-        logger.error("LLM error: %s — using smart_agent", exc)
+        logger.error("LLM error: %s — switching episode to smart_agent", exc)
+        raise  # re-raise so run_episode can catch it and set llm_failed = True
 
     return smart_agent(observation)
 
@@ -413,12 +414,18 @@ def run_episode(
     llm_failed = False
 
     for step_n in range(max_steps):
+        # Trim conversation to avoid exceeding small model context limits
+        MAX_CONV_TURNS = 6
+        if len(conversation) > MAX_CONV_TURNS * 2:
+            conversation = conversation[-(MAX_CONV_TURNS * 2):]
+
         if use_llm and client and not llm_failed:
             try:
                 action = llm_agent(obs, client, config["model_name"], conversation)
             except Exception as exc:
                 logger.error("LLM error: %s — switching episode to smart_agent", exc)
                 llm_failed = True
+                model_label = f"{config.get('model_name')}→smart_agent"
                 action = smart_agent(obs)
         else:
             action = smart_agent(obs)
