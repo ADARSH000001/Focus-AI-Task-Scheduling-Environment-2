@@ -1,5 +1,5 @@
 {
-  "overall_score": 0.630667,
+  "overall_score": 0.63,
   "eval_seeds": {
     "easy": [
       42,
@@ -20,7 +20,7 @@
   "difficulties": [
     {
       "difficulty": "easy",
-      "score": 0.9899999999999999,
+      "score": 0.989,
       "total_reward": 111.0,
       "episodes": [
         {
@@ -45,50 +45,50 @@
     },
     {
       "difficulty": "medium",
-      "score": 0.875667,
+      "score": 0.875,
       "total_reward": 125.0,
       "episodes": [
         {
           "episode": 1,
           "seed": 7,
-          "score": 0.875667,
+          "score": 0.875,
           "total_reward": 41.0
         },
         {
           "episode": 2,
           "seed": 8,
-          "score": 0.875667,
+          "score": 0.875,
           "total_reward": 45.0
         },
         {
           "episode": 3,
           "seed": 9,
-          "score": 0.875667,
+          "score": 0.875,
           "total_reward": 39.0
         }
       ]
     },
     {
       "difficulty": "hard",
-      "score": 0.4319443333333333,
+      "score": 0.431,
       "total_reward": 95.0,
       "episodes": [
         {
           "episode": 1,
           "seed": 13,
-          "score": 0.606167,
+          "score": 0.606,
           "total_reward": 62.0
         },
         {
           "episode": 2,
           "seed": 14,
-          "score": 0.369333,
+          "score": 0.369,
           "total_reward": 24.0
         },
         {
           "episode": 3,
           "seed": 15,
-          "score": 0.320333,
+          "score": 0.32,
           "total_reward": 9.0
         }
       ]

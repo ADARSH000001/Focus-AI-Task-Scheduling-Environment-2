@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import yaml
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
@@ -33,23 +34,11 @@ from reward_and_tasks import GRADERS               # noqa: E402
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(
-    title="Focus AI Environment API",
-    version="2.0.0",
-    description="OpenEnv-compatible RL environment for AI task scheduling.",
-)
-
-# NOTE: Single global env instance. Not thread-safe by design.
-# For production, replace with per-session env management (e.g. dict keyed by session_id
-# with a threading.Lock() around all mutations in /step and /reset).
-# Acceptable for hackathon single-agent evaluation.
-_env: Optional[FocusEnv] = None
-
 startup_logger = logging.getLogger("app.startup")
 
 
-@app.on_event("startup")
-async def validate_manifest() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     """Validate openenv.yaml at startup and log diagnostics."""
     tasks = _manifest_tasks()
     if not tasks:
@@ -67,6 +56,21 @@ async def validate_manifest() -> None:
         startup_logger.info(
             "openenv.yaml loaded — %d tasks found.", len(tasks)
         )
+    yield  # app runs here
+
+
+app = FastAPI(
+    title="Focus AI Environment API",
+    version="2.0.0",
+    description="OpenEnv-compatible RL environment for AI task scheduling.",
+    lifespan=lifespan,
+)
+
+# NOTE: Single global env instance. Not thread-safe by design.
+# For production, replace with per-session env management (e.g. dict keyed by session_id
+# with a threading.Lock() around all mutations in /step and /reset).
+# Acceptable for hackathon single-agent evaluation.
+_env: Optional[FocusEnv] = None
 
 
 # ---------------------------------------------------------------------------

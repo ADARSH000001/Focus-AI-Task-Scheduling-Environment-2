@@ -120,6 +120,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Exit 1 if API_BASE_URL / MODEL_NAME / HF_TOKEN are missing",
     )
+    parser.add_argument(
+        "--num-episodes",
+        type=int,
+        default=NUM_EVAL_EPISODES,
+        help=f"Number of seeded eval episodes per difficulty (default: {NUM_EVAL_EPISODES})",
+    )
     return parser.parse_args()
 
 
@@ -339,6 +345,12 @@ def llm_agent(
 
     conversation.append({"role": "user", "content": obs_text})
 
+    # Sliding window — keep only the last 6 turn-pairs (12 messages) to stay
+    # within small-model context limits. The system prompt is prepended separately.
+    MAX_CONV_MESSAGES = 12
+    if len(conversation) > MAX_CONV_MESSAGES:
+        conversation[:] = conversation[-MAX_CONV_MESSAGES:]
+
     try:
         response = client.chat.completions.create(
             model=model_name,
@@ -491,6 +503,9 @@ def main() -> None:
     results = []
     for diff in difficulties:
         seeds = EVAL_SEEDS.get(diff, [None])
+        # Respect --num-episodes: slice the seeds list (pad with None if needed)
+        num_ep = args.num_episodes
+        seeds = (seeds * ((num_ep // len(seeds)) + 1))[:num_ep]
         episode_results = []
         for ep_idx, seed in enumerate(seeds):
             result = run_episode(diff, args.max_steps, config, seed=seed)
@@ -522,7 +537,12 @@ def main() -> None:
 
     # Compute and persist aggregate score across all difficulties
     if len(results) > 1:
+        import math
         from reward_and_tasks import grade_performance
+
+        def _trunc3(v: float) -> float:
+            """Truncate to 3 decimal places (cosmetic — avoids floating-point noise in JSON)."""
+            return math.floor(v * 1000) / 1000
 
         combined_metrics = {
             key: sum(r["metrics"].get(key, 0) for r in results)
@@ -538,18 +558,18 @@ def main() -> None:
         overall = float(grade_performance(combined_metrics))
 
         summary = {
-            "overall_score": overall,
+            "overall_score": _trunc3(overall),
             "eval_seeds": EVAL_SEEDS,
             "difficulties": [
                 {
                     "difficulty":   r["difficulty"],
-                    "score":        r["score"],
+                    "score":        _trunc3(r["score"]),
                     "total_reward": round(float(r["total_reward"]), 4),
                     "episodes": [
                         {
                             "episode":      ep["episode"],
                             "seed":         ep["seed"],
-                            "score":        ep["score"],
+                            "score":        _trunc3(ep["score"]),
                             "total_reward": round(float(ep["total_reward"]), 4),
                         }
                         for ep in r["episodes"]

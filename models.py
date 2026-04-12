@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Task(BaseModel):
@@ -52,8 +52,14 @@ class Reward(BaseModel):
     """Step reward with a diagnostic breakdown."""
 
     reward: float = Field(description="Numeric reward for this step, clamped to [-20, +20]")
-    normalized_reward: float = Field(default=0.0, description="Reward normalized to [-1, +1] for RL training")
+    normalized_reward: float = Field(default=0.0, description="Reward normalized to [-1, +1] for RL training — auto-computed from reward")
     task_completed: bool = Field(default=False, description="A task was finished this step")
     before_deadline: bool = Field(default=False, description="The finished task beat its deadline")
     missed_deadline: bool = Field(default=False, description="The finished task missed its deadline")
     priority: Optional[str] = Field(default=None, description="Priority of the completed task, if any")
+
+    @model_validator(mode="after")
+    def compute_normalized(self) -> "Reward":
+        """Auto-compute normalized_reward so callers never have to pass it in."""
+        self.normalized_reward = 2.0 * (self.reward + 20.0) / 40.0 - 1.0
+        return self

@@ -33,9 +33,11 @@ tasks:
     name: hard_scheduling
     grader: "reward_and_tasks:grade_hard"
     description: >
-      Late-day crisis — medium energy (55/100), 6 competing tasks including
-      two critical blockers (incident + security patch) on tight deadlines.
-      Tests genuine multi-step planning under resource constraints.
+      Late-day crisis — low energy (~38/100), already in the low band at
+      start. 6 competing tasks on tight deadlines (10–16h range). Full
+      completion is not realistically achievable — the grader rewards
+      proportional progress. Tests genuine multi-step planning under
+      severe resource constraints.
       Scoring: 35% completion + 30% on-time + 20% energy + 15% priority.
 
 observation_space:

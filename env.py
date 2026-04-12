@@ -341,7 +341,7 @@ class FocusEnv:
         return {"invalid": True}
 
     def _do_take_break(self, hours: int) -> dict:
-        if hours <= 0:
+        if hours <= 0 or hours > 2:   # cap at 2h — matches legal_actions and reward model
             return {"invalid": True}
         self._state["energy"] = min(100, self._state["energy"] + hours * 10)
         self._state["time"]   = min(24.0, self._state["time"] + hours)

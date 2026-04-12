@@ -15,11 +15,11 @@ app_port: 7860
 Focus AI is an **OpenEnv-compatible RL environment** where an agent must:
 
 - Complete tasks before their deadlines
-- Manage energy levels to avoid burnout
-- Prioritize high-importance work
-- Recover efficiently when exhausted
+- Manage cognitive energy to avoid burnout
+- Prioritize high-importance work over low-priority tasks
+- Recover efficiently when exhausted before continuing
 
-The environment simulates a real knowledge-worker's day — making it directly useful for agent benchmarking, policy evaluation, and productivity research.
+The environment simulates a real knowledge-worker's day — making it directly useful for agent benchmarking, policy evaluation, and LLM productivity research.
 
 ---
 
@@ -37,10 +37,12 @@ String-based actions passed as plain text:
 
 | Action | Description |
 |---|---|
-| `start_task('<id>')` | Work on a task (costs time + energy) |
-| `take_break(<hours>)` | Rest to recover energy (costs time) |
-| `switch_task('<id>')` | Change current focus (0.5h overhead) |
-| `noop()` | Do nothing (penalized -3) |
+| `start_task('<id>')` | Work on a task for its full duration (costs time + energy) |
+| `take_break(1)` or `take_break(2)` | Rest to recover energy (+10 per hour). Max 2 hours. |
+| `switch_task('<id>')` | Change active focus with a 0.5h context-switch overhead |
+| `noop()` | Do nothing — always penalized -3 |
+
+> `take_break(N)` is capped at N=2. Any value above 2 is treated as an invalid action.
 
 ### Observation Space
 
@@ -48,58 +50,63 @@ Typed Pydantic `Observation` model returned from `reset()` and `step()`:
 
 | Field | Type | Description |
 |---|---|---|
-| `time` | float | Current hour (starts at 9, ends at 24) |
+| `time` | float | Current hour (starts at 9.0, ends at 24.0) |
 | `energy` | int | Energy level 0–100 |
-| `energy_level` | str | `low` (≤40) / `medium` (41–70) / `high` (>70) |
-| `tasks` | List[Task] | All tasks with status |
-| `current_task` | str \| None | Active task id |
+| `energy_level` | str | `low` (<=40) / `medium` (41–70) / `high` (>70) |
+| `tasks` | List[Task] | All tasks with current status |
+| `current_task` | str or None | Active task id |
 | `recent_actions` | List[str] | Last 3 actions taken |
-| `goal` | str | Episode objective |
-| `legal_actions` | List[str] | Valid actions at this state |
+| `goal` | str | Episode objective text |
+| `legal_actions` | List[str] | All valid actions right now |
 
 ---
 
 ## 4. Reward Function
 
-Reward is calculated per step and clamped to `[-20, +20]`.
+Reward is calculated per step and clamped to `[-20, +20]`. These values reflect the actual code in `reward_and_tasks.py`:
 
 | Condition | Reward |
 |---|---|
-| Complete high-priority task | +15 base (+2 priority bonus) |
-| Complete medium-priority task | +12 base |
-| Complete low-priority task | +10 base (-2 priority penalty) |
-| Finish before deadline | +7 total (+5 deadline + +2 early) |
-| Miss deadline | -10 |
-| Work at high energy | +3 |
-| Work at medium energy | +1 |
-| Work at low energy | -11 (-8 delta -3 extra) |
-| Smart break at low energy | +7 (+5 delta +2 extra) |
-| Unnecessary break at high energy | -3 |
-| `noop()` | -3 |
-| Invalid action | -3 (flat) |
-| Burnout (energy ≤ 0) | -10 on top of step reward |
+| Complete high-priority task | +15 base +2 priority bonus = **+17** |
+| Complete medium-priority task | **+12** base |
+| Complete low-priority task | +10 base -2 priority penalty = **+8** |
+| Finish before deadline | **+5** |
+| Miss deadline | **-10** |
+| Work at high energy | **+3** |
+| Work at medium energy | **+1** |
+| Work at low energy | **-5** |
+| Break at low energy | **+4** |
+| Break at medium energy | **+1** |
+| Unnecessary break at high energy | **-3** |
+| `noop()` | **-3** |
+| Invalid action | **-3** (flat, no state mutation) |
+| Burnout (energy reaches 0) | **-10** added on top of step reward |
+
+> The `Reward` model auto-computes `normalized_reward` in `[-1, +1]` from the raw reward via a Pydantic model_validator. You do not need to pass it in manually.
 
 ---
 
 ## 5. Task Difficulty Levels
 
-### 🟢 Easy
-- 2 tasks, high starting energy (80/100)
-- Randomized from task pool by default
+### Easy
+- 2 tasks, **high starting energy (80/100)**
+- Generous deadlines, 1–2 hour task durations
 - Scoring: 60% task completion + 40% on-time delivery
 
-### 🟡 Medium
-- 3 tasks, medium energy (60/100)
-- Requires balancing energy recovery against deadline pressure
+### Medium
+- 3 tasks, **medium starting energy (60/100)**
+- Tighter deadlines, requires some energy management
 - Scoring: 40% completion + 35% on-time + 25% energy efficiency
 
-### 🔴 Hard
-- 6 tasks, low energy (38/100) — already in the `low` band at start
-- Includes critical-priority blockers with tight deadlines
+### Hard
+- 6 tasks, **low starting energy (~38/100)** — already in the `low` band from the start
+- Tight deadlines (10–16h range), task durations up to 3h
 - Requires genuine multi-step planning under severe resource constraints
 - Scoring: 35% completion + 30% on-time + 20% energy + 15% priority quality
 
-> **Note:** All difficulties use randomized task generation by default (`get_random_task()`), preventing LLMs from memorizing fixed scenarios. Pass a `seed` integer to `reset()` for deterministic episodes.
+> **Hard design intent:** With 6 tasks, a 10-step cap, and energy starting in the `low` band, full completion is not realistically achievable. The grader rewards proportional progress. Expect scores in the 0.30–0.65 range even for strong agents.
+
+> All difficulties use randomized task generation by default via `get_random_task()`, preventing LLMs from memorizing fixed scenarios. Pass a `seed` integer to `reset()` for reproducible episodes.
 
 ---
 
@@ -108,36 +115,40 @@ Reward is calculated per step and clamped to `[-20, +20]`.
 Each difficulty has a deterministic grader. Raw scores are mapped to **strictly inside (0, 1)** via `safe_score()`:
 
 ```
-safe_score(raw) = 0.01 + 0.98 × raw,    raw ∈ [0, 1]
+safe_score(raw) = 0.01 + 0.98 x clamp(raw, 0, 1)
 ```
 
 - **Minimum possible score**: 0.01 (nothing done)
 - **Maximum possible score**: 0.99 (perfect episode)
-- **Never 0.0 or 1.0** — guaranteed by linear mapping + runtime assertion
+- **Never exactly 0.0 or 1.0** — guaranteed by the formula + runtime assertion
 
 | Grader | Weights |
 |---|---|
 | `grade_easy` | 60% completion + 40% on-time |
 | `grade_medium` | 40% completion + 35% on-time + 25% energy efficiency |
 | `grade_hard` | 35% completion + 30% on-time + 20% energy + 15% priority quality |
+| `grade_performance` | Cross-difficulty aggregate used in `baseline_scores.json` |
+
+> **grade_hard fix:** If an agent completes 0 tasks, the priority quality component now correctly scores 0. A prior bug used `max(1, completed_tasks)` as the denominator, which inflated scores for agents that did nothing. This is fixed.
 
 ---
 
 ## 7. Agent Modes
 
 ### Smart Agent (default)
-A built-in deterministic baseline. No API keys required. Follows priority + deadline ordering with energy-aware break decisions.
+A built-in deterministic baseline. No API keys required. Follows priority + deadline ordering with energy-aware break decisions. Run immediately with `python inference.py`.
 
 ### LLM Agent
-Uses any OpenAI-compatible API. Configured via environment variables. Falls back to smart agent automatically on API errors or invalid outputs.
+Uses any OpenAI-compatible API. Configured via environment variables. Falls back to the smart agent automatically on API errors or invalid outputs.
 
-> Use `--strict-env` to disable the silent fallback and fail loudly if LLM env vars are missing — recommended when you actually want to test LLM performance.
+> **Important:** Use `--strict-env` if you actually intend to test an LLM. Without it, a missing or wrong `HF_TOKEN` causes a silent fallback to the smart agent — you will get smart agent scores and think your LLM performed well.
 
 The LLM receives a structured system prompt covering:
 - Energy-first decision rules
 - Priority + deadline sorting strategy
 - Reward penalties to avoid
 - Hard override cases (e.g., work through low energy if deadline is imminent)
+- A sliding conversation window (last 12 messages) to stay within small-model context limits
 
 ---
 
@@ -152,25 +163,23 @@ An episode ends when ANY of these is true:
 
 Maximum steps per episode: **10**
 
-> **Hard difficulty note:** With 6 tasks and a 10-step cap, a perfect episode is not realistically achievable. The hard grader is designed to reward proportional progress, not full completion.
-
 ---
 
 ## 9. OpenEnv Compliance
 
 | Requirement | Status |
 |---|---|
-| `reset()` returns typed `Observation` | ✅ |
-| `step()` returns `(obs, reward, done, info)` | ✅ |
-| `state` is a `@property` returning `Observation` | ✅ |
-| Typed Pydantic models (`Observation`, `Action`, `Reward`) | ✅ |
-| `legal_actions` field in `Observation` | ✅ |
-| `openenv.yaml` with `entry_point: env:FocusEnv` | ✅ |
-| 3 tasks with graders returning strictly `(0, 1)` | ✅ |
-| `inference.py` with OpenAI client | ✅ |
-| Structured logs `[START]` `[STEP]` `[END]` in `key=value` format | ✅ |
-| Dockerfile builds and runs | ✅ |
-| HF Space deployable | ✅ |
+| `reset()` returns typed `Observation` | Yes |
+| `step()` returns `(obs, reward, done, info)` | Yes |
+| `state` is a `@property` returning `Observation` | Yes |
+| Typed Pydantic models (`Observation`, `Action`, `Reward`) | Yes |
+| `legal_actions` field in `Observation` | Yes |
+| `openenv.yaml` with `entry_point: env:FocusEnv` | Yes |
+| 3 tasks with graders returning strictly `(0, 1)` | Yes |
+| `inference.py` with OpenAI client | Yes |
+| Structured logs `[START]` `[STEP]` `[END]` in `key=value` format | Yes |
+| Dockerfile builds and runs | Yes |
+| HF Space deployable | Yes |
 
 ---
 
@@ -186,6 +195,11 @@ python inference.py
 ```bash
 python inference.py --difficulty easy     # or medium / hard
 python inference.py --difficulty all      # runs all three (default)
+```
+
+### Local — Custom Episode Count
+```bash
+python inference.py --num-episodes 5      # run 5 seeded episodes per difficulty
 ```
 
 ### Local — LLM Agent
@@ -214,6 +228,8 @@ uv sync          # installs from uv.lock — exact versions
 uv run python inference.py
 ```
 
+> **Python version note:** `uv.lock` was generated on Python 3.14 (dev). The Dockerfile runs Python 3.10. If you hit import errors in Docker, install from `requirements.txt` directly rather than `uv sync`.
+
 ---
 
 ## 11. Environment Variables
@@ -224,22 +240,27 @@ uv run python inference.py
 | `MODEL_NAME` | No | `meta-llama/Llama-3.1-8B-Instruct` | Model to use |
 | `HF_TOKEN` | For LLM mode | — | Hugging Face API token |
 
-> If `HF_TOKEN` is not set, the runner falls back to the smart agent silently. Use `--strict-env` to fail loudly instead.
+> If `HF_TOKEN` is not set, the runner falls back to the smart agent silently. Use `--strict-env` to make it fail loudly instead.
+
+> Deprecated `api-inference.huggingface.co` URLs are auto-corrected to `router.huggingface.co/v1` at startup with a warning.
 
 ---
 
 ## 12. Structured Log Format
 
-All episode output follows `key=value` format for machine parsing:
+All episode output follows `key=value` format for machine parsing. All reward values are clamped to `[-20, +20]`.
 
 ```
 [START] task=easy env=focus_ai model=smart_agent
 [STEP]  step=1 action=start_task('report') reward=20.0000 done=false error=null
 [STEP]  step=2 action=start_task('inbox') reward=12.0000 done=true error=null
-[END]   task=easy success=true steps=2 score=0.9900 rewards=20.0000,12.0000
+[END]   task=easy success=true steps=2 score=0.990 rewards=20.0000,12.0000
 ```
 
-> All reward values in logs are clamped to `[-20, +20]` per the reward contract.
+Stagnation termination also emits a dedicated line:
+```
+[END] task=hard termination_reason=stagnation step=7
+```
 
 ---
 
@@ -249,18 +270,22 @@ All episode output follows `key=value` format for machine parsing:
 |---|---|---|
 | GET | `/` | Status check |
 | GET | `/health` | Health check |
-| GET | `/tasks` | List task definitions |
-| POST | `/reset` | Start new episode |
-| POST | `/step` | Apply action |
-| GET | `/state` | Current observation + metrics |
-| GET | `/grade/{difficulty}` | Current episode score |
-| GET | `/validate` | OpenEnv compliance check |
+| GET | `/tasks` | List task definitions from openenv.yaml |
+| POST | `/reset` | Start new episode (body: `{"difficulty": "easy"}`) |
+| POST | `/step` | Apply action (body: `{"action": "start_task('id')"}`) |
+| GET | `/state` | Current observation + metrics + human-readable text |
+| GET | `/grade/{difficulty}` | Score for the currently running episode |
+| GET | `/validate` | OpenEnv compliance check (all must pass) |
+| GET | `/score/{difficulty}` | Run one smart-agent episode and return its score |
+| GET | `/benchmark` | Run smart-agent across all 3 difficulties with fixed seeds |
+| GET | `/history` | Last 5 completed episode trajectories |
 
 ---
 
 ## 14. Project Structure
 
 ```
+project/
 ├── env.py                  # FocusEnv class + smart_agent baseline
 ├── reward_and_tasks.py     # Reward function, task generators, graders, safe_score
 ├── inference.py            # Inference runner (LLM + smart agent)
@@ -281,41 +306,63 @@ All episode output follows `key=value` format for machine parsing:
 ## 15. HF Space Deployment
 
 1. Create HF Space with SDK type **Docker**
-2. Upload this folder
+2. Upload this folder — exclude `__pycache__/` and `.git/`
 3. Set secrets: `HF_TOKEN`, `API_BASE_URL`, `MODEL_NAME`
-4. Verify: `GET /health` → `{"status":"healthy"}`
+4. Verify: `GET /health` returns `{"status":"healthy"}`
+
+> Make sure `__pycache__/` is in your `.gitignore` before pushing. Committing compiled `.pyc` files causes unnecessary repo bloat and exposes your local Python version.
 
 ---
 
 ## 16. Baseline Scores (Smart Agent)
 
-Results from 3 seeded evaluation episodes per difficulty. Seeds are fixed in `inference.py` (`EVAL_SEEDS`) to ensure reproducibility. Run `python inference.py` to reproduce.
+Results from 3 seeded evaluation episodes per difficulty. Seeds are fixed in `inference.py` (`EVAL_SEEDS`) to guarantee reproducibility. Run `python inference.py` to reproduce.
 
 ```json
 {
-  "overall_score": 0.630667,
+  "overall_score": 0.630,
   "eval_seeds": {
     "easy":   [42, 43, 44],
-    "medium": [7,  8,  9 ],
+    "medium": [7,  8,  9],
     "hard":   [13, 14, 15]
   },
   "difficulties": [
-    { "difficulty": "easy",   "score": 0.9900, "total_reward": 111.0 },
-    { "difficulty": "medium", "score": 0.8757, "total_reward": 125.0 },
-    { "difficulty": "hard",   "score": 0.4319, "total_reward":  95.0 }
+    { "difficulty": "easy",   "score": 0.990, "total_reward": 111.0 },
+    { "difficulty": "medium", "score": 0.875, "total_reward": 125.0 },
+    { "difficulty": "hard",   "score": 0.431, "total_reward":  95.0 }
   ]
 }
 ```
 
-> Hard difficulty scores vary significantly across seeds (0.32–0.61), reflecting genuine scenario difficulty rather than agent inconsistency. This is expected: hard episodes involve tight energy constraints and 6 tasks within a 10-step cap.
-
 Full per-episode breakdown is in `baseline_scores.json`.
+
+> Hard scores vary significantly across seeds (0.32–0.61). This reflects genuine scenario variance — different seeds produce different priority mixes from the 12-task pool, not agent inconsistency.
 
 ---
 
-## 17. Known Limitations
+## 17. Benchmarking Your LLM
 
-- **Hard difficulty is intentionally near-unsolvable**: 6 tasks + 38 starting energy + 10-step cap means full completion is not realistically achievable. The grader rewards proportional progress.
-- **Task pool is small**: 12 tasks total. Hard difficulty samples 6 of them, so random scenarios can be unbalanced by priority distribution.
-- **No unit tests**: The environment logic is validated via `env.py` self-test and OpenEnv compliance check, but no formal test suite exists.
-- **Python version mismatch risk**: `uv.lock` was generated on Python 3.14; the Dockerfile runs Python 3.10. If you hit import errors in Docker, install from `requirements.txt` directly rather than `uv sync`.
+To evaluate any OpenAI-compatible model against these baselines:
+
+```bash
+export HF_TOKEN="hf_xxx"
+export MODEL_NAME="your-model-id"
+export API_BASE_URL="https://router.huggingface.co/v1"
+python inference.py --difficulty all --strict-env --num-episodes 3
+```
+
+Compare the resulting `baseline_scores.json` to the smart agent scores above. Targets to beat:
+
+- **Easy (0.990):** Smart agent nearly maxes this. Beating it requires zero mistakes. Realistic.
+- **Medium (0.875):** A well-prompted LLM should match or exceed this. Look for improvements in energy efficiency.
+- **Hard (0.431):** Any LLM consistently above 0.55 is meaningfully better than the smart agent. This is where multi-step reasoning earns its keep.
+
+---
+
+## 18. Known Limitations
+
+- **Hard difficulty is intentionally near-unsolvable at full completion.** 6 tasks + low starting energy + 10-step cap. The grader rewards proportional progress. This is by design, not a bug.
+- **Task pool has 12 entries.** Hard samples 6. With 4 tasks of each priority level, random seeds can produce very unbalanced scenarios, causing high variance in hard episode scores.
+- **No unit tests.** The environment is validated via `env.py` self-test and the `/validate` endpoint. If you modify `reward_and_tasks.py` or graders, manually verify the `safe_score()` contract holds.
+- **Python version mismatch.** `uv.lock` was generated on Python 3.14 (dev). The Dockerfile runs Python 3.10. Use `pip install -r requirements.txt` in Docker, not `uv sync`.
+- **`_current_trajectory` is unbounded within an episode.** Normal usage (max 10 steps) is fine. If you build a wrapper that calls `step()` in a loop without checking `done`, this list grows uncapped.

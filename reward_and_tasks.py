@@ -302,14 +302,15 @@ def grade_medium(metrics: dict) -> float:
 
 
 def grade_hard(metrics: dict) -> float:
-    total = max(1, metrics.get("total_tasks", 1))
-    steps = max(1, metrics.get("total_steps", 1))
-    completed = max(1, metrics.get("completed_tasks", 1))
+    total     = max(1, metrics.get("total_tasks", 1))
+    steps     = max(1, metrics.get("total_steps", 1))
+    completed = metrics.get("completed_tasks", 0)   # 0 is correct — no fake floor
     raw = (
         0.35 * _safe_ratio(metrics.get("completed_tasks", 0), total)
         + 0.30 * _safe_ratio(metrics.get("on_time", 0), total)
         + 0.20 * _safe_ratio(metrics.get("good_energy_usage", 0), steps)
         + 0.15 * _safe_ratio(metrics.get("high_priority_choices", 0), completed)
+        # _safe_ratio handles denominator=0 by returning 0.0, so completed=0 is safe
     )
     return safe_score(raw)
 
