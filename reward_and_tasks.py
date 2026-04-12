@@ -54,6 +54,17 @@ def safe_score(raw: float) -> float:
     return result
 
 
+def normalize_reward(raw: float, min_r: float = -20.0, max_r: float = 20.0) -> float:
+    """
+    Normalize a raw reward in [min_r, max_r] to [-1, +1].
+    Used for RL training algorithms that expect normalized signals.
+    The raw reward is preserved for logging and human readability.
+    """
+    if max_r == min_r:
+        return 0.0
+    return 2.0 * (raw - min_r) / (max_r - min_r) - 1.0
+
+
 # ---------------------------------------------------------------------------
 # Energy helpers
 # ---------------------------------------------------------------------------
@@ -116,7 +127,7 @@ def get_random_task(difficulty: str, seed: int | None = None) -> dict:
     config = {
         "easy":   {"n": 2, "energy": 80, "deadline_range": (12, 20)},
         "medium": {"n": 3, "energy": 60, "deadline_range": (10, 18)},
-        "hard":   {"n": 6, "energy": 55, "deadline_range": (10, 16)},
+        "hard":   {"n": 6, "energy": 38, "deadline_range": (10, 16)},
     }[difficulty]
 
     assert len(TASK_POOL) >= config["n"], (
@@ -244,7 +255,7 @@ def get_medium_task() -> dict:
 
 def get_hard_task() -> dict:
     return {
-        "energy": 55, "energy_level": "medium",
+        "energy": 38, "energy_level": "low",
         "tasks": [
             {"id": "incident",   "name": "Respond to production incident",     "priority": "high",   "deadline": 12, "difficulty": 2, "category": "engineering"},
             {"id": "security",   "name": "Apply critical security patch",      "priority": "high",   "deadline": 13, "difficulty": 3, "category": "engineering"},

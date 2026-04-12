@@ -38,6 +38,7 @@ from reward_and_tasks import (
     TASK_LOADERS,
     build_env_tasks,
     calculate_reward,
+    normalize_reward,
     numeric_to_level,
     safe_score,
 )
@@ -71,6 +72,8 @@ class FocusEnv:
         self.history: list = []
         self.metrics: Dict[str, Any] = {}
         self._stagnation: int = 0
+        self.episode_log: list = []       # stores last 5 episode summaries
+        self._current_trajectory: list = []
 
     # ------------------------------------------------------------------
     # OpenEnv interface
@@ -79,6 +82,18 @@ class FocusEnv:
     def reset(self, seed: int | None = None) -> Observation:
         """Start a fresh episode and return the initial Observation."""
         from reward_and_tasks import get_random_task
+
+        # Save completed trajectory before starting a new episode
+        if self._current_trajectory:
+            self.episode_log.append({
+                "difficulty": self.difficulty,
+                "trajectory": list(self._current_trajectory),
+                "metrics":    dict(self.metrics),
+            })
+            if len(self.episode_log) > 5:
+                self.episode_log.pop(0)   # keep only last 5
+        self._current_trajectory = []
+
         if seed is not None:
             scenario = get_random_task(self.difficulty, seed=seed)
         else:
@@ -214,11 +229,21 @@ class FocusEnv:
         obs = self._build_obs()
         reward_obj = Reward(
             reward=reward_value,
+            normalized_reward=normalize_reward(reward_value),
             task_completed=result.get("task_completed", False),
             before_deadline=result.get("before_deadline", False),
             missed_deadline=result.get("missed_deadline", False),
             priority=result.get("priority"),
         )
+
+        # ---- Episode trajectory tracking ---------------------------------
+        self._current_trajectory.append({
+            "step":    self.metrics["total_steps"],
+            "action":  action,
+            "reward":  reward_value,
+            "time":    self._state["time"],
+            "energy":  self._state["energy"],
+        })
 
         info: Dict[str, Any] = {"metrics": dict(self.metrics), "score": None}
         if done:
@@ -279,7 +304,16 @@ class FocusEnv:
         if done:
             info["score"] = GRADERS[self.difficulty](self.metrics)
 
-        return obs, Reward(reward=-3.0), done, info
+        # Track invalid actions in trajectory too
+        self._current_trajectory.append({
+            "step":    self.metrics["total_steps"],
+            "action":  f"INVALID({reason})",
+            "reward":  -3.0,
+            "time":    self._state["time"],
+            "energy":  self._state["energy"],
+        })
+
+        return obs, Reward(reward=-3.0, normalized_reward=normalize_reward(-3.0)), done, info
 
     # ------------------------------------------------------------------
     # Action implementations
@@ -416,7 +450,7 @@ class FocusEnv:
         pending_lines = []
         for t in pending_tasks:
             time_left = t["deadline"] - time
-            urgency = "⚠ URGENT" if time_left <= t["duration"] + 1 else "OK"
+            urgency = "!! URGENT" if time_left <= t["duration"] + 1 else "OK"
             pending_lines.append(
                 f"  [TODO] {t['id']:14s}  {t['name']}\n"
                 f"           priority={t['priority']:6s}  "
@@ -605,11 +639,11 @@ if __name__ == "__main__":
                 score = info["score"]
                 print(f"\n  Score ({diff}): {score}")
                 if not (0 < score < 1):
-                    print(f"  ❌ SCORE OUT OF RANGE: {score}")
+                    print(f"  [FAIL] SCORE OUT OF RANGE: {score}")
                     all_passed = False
                 else:
-                    print(f"  ✓  score strictly in (0, 1)")
+                    print(f"  [OK]  score strictly in (0, 1)")
                 break
 
-    print("\n" + ("✓  All scores in (0, 1)." if all_passed else "❌  FAILURES DETECTED."))
+    print("\n" + ("[OK]  All scores in (0, 1)." if all_passed else "[FAIL]  FAILURES DETECTED."))
     sys.exit(0 if all_passed else 1)

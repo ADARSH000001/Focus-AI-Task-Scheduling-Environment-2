@@ -1,20 +1,97 @@
 {
-  "overall_score": 0.7752166666666667,
+  "overall_score": 0.545535,
+  "eval_seeds": {
+    "easy": [
+      42,
+      43,
+      44
+    ],
+    "medium": [
+      7,
+      8,
+      9
+    ],
+    "hard": [
+      13,
+      14,
+      15
+    ]
+  },
   "difficulties": [
     {
       "difficulty": "easy",
-      "score": 0.99,
-      "total_reward": 34.0
+      "score": 0.9899999999999999,
+      "total_reward": 111.0,
+      "episodes": [
+        {
+          "episode": 1,
+          "seed": 42,
+          "score": 0.99,
+          "total_reward": 34.0
+        },
+        {
+          "episode": 2,
+          "seed": 43,
+          "score": 0.99,
+          "total_reward": 40.0
+        },
+        {
+          "episode": 3,
+          "seed": 44,
+          "score": 0.99,
+          "total_reward": 37.0
+        }
+      ]
     },
     {
       "difficulty": "medium",
-      "score": 0.814417,
-      "total_reward": 35.0
+      "score": 0.8484446666666666,
+      "total_reward": 115.0,
+      "episodes": [
+        {
+          "episode": 1,
+          "seed": 7,
+          "score": 0.875667,
+          "total_reward": 41.0
+        },
+        {
+          "episode": 2,
+          "seed": 8,
+          "score": 0.794,
+          "total_reward": 35.0
+        },
+        {
+          "episode": 3,
+          "seed": 9,
+          "score": 0.875667,
+          "total_reward": 39.0
+        }
+      ]
     },
     {
       "difficulty": "hard",
-      "score": 0.521233,
-      "total_reward": 31.0
+      "score": 0.4297663333333333,
+      "total_reward": 81.0,
+      "episodes": [
+        {
+          "episode": 1,
+          "seed": 13,
+          "score": 0.599633,
+          "total_reward": 48.0
+        },
+        {
+          "episode": 2,
+          "seed": 14,
+          "score": 0.369333,
+          "total_reward": 24.0
+        },
+        {
+          "episode": 3,
+          "seed": 15,
+          "score": 0.320333,
+          "total_reward": 9.0
+        }
+      ]
     }
   ]
 }

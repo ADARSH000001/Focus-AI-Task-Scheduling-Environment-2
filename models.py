@@ -52,6 +52,7 @@ class Reward(BaseModel):
     """Step reward with a diagnostic breakdown."""
 
     reward: float = Field(description="Numeric reward for this step, clamped to [-20, +20]")
+    normalized_reward: float = Field(default=0.0, description="Reward normalized to [-1, +1] for RL training")
     task_completed: bool = Field(default=False, description="A task was finished this step")
     before_deadline: bool = Field(default=False, description="The finished task beat its deadline")
     missed_deadline: bool = Field(default=False, description="The finished task missed its deadline")

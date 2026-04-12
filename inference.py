@@ -44,6 +44,16 @@ _SUCCESS_THRESHOLD = {
     "hard":   0.40,
 }
 
+# Fixed seeds for evaluation — guarantees baseline_scores.json is
+# reproducible across runs. Training uses no seed (truly random).
+# Change these seeds to evaluate on a different fixed scenario set.
+EVAL_SEEDS = {
+    "easy":   [42, 43, 44],
+    "medium": [7,  8,  9 ],
+    "hard":   [13, 14, 15],
+}
+NUM_EVAL_EPISODES = 3
+
 logger = logging.getLogger(__name__)
 
 
@@ -358,6 +368,7 @@ def run_episode(
     difficulty: str,
     max_steps: int,
     config: Dict[str, Optional[str]],
+    seed: int | None = None,
 ) -> Dict[str, Any]:
     """Run one full episode, returning results with a guaranteed (0,1) score."""
     use_llm = bool(config.get("hf_token"))
@@ -375,7 +386,7 @@ def run_episode(
             use_llm = False
 
     env = FocusEnv(difficulty=difficulty)
-    obs = env.reset()
+    obs = env.reset(seed=seed)
 
     model_label = config.get("model_name") if use_llm else "smart_agent"
     task_id = difficulty  # matches openenv.yaml task ids
@@ -472,8 +483,24 @@ def main() -> None:
 
     results = []
     for diff in difficulties:
-        result = run_episode(diff, args.max_steps, config)
-        results.append(result)
+        seeds = EVAL_SEEDS.get(diff, [None])
+        episode_results = []
+        for ep_idx, seed in enumerate(seeds):
+            result = run_episode(diff, args.max_steps, config, seed=seed)
+            result["episode"] = ep_idx + 1
+            result["seed"] = seed
+            episode_results.append(result)
+
+        # Average score across episodes
+        avg_score = sum(r["score"] for r in episode_results) / len(episode_results)
+        results.append({
+            "difficulty":      diff,
+            "score":           avg_score,
+            "total_reward":    sum(r["total_reward"] for r in episode_results),
+            "metrics":         episode_results[-1]["metrics"],  # last episode metrics
+            "episodes":        episode_results,
+            "agent":           episode_results[-1]["agent"],
+        })
 
     # Compute and persist aggregate score across all difficulties
     if len(results) > 1:
@@ -494,11 +521,21 @@ def main() -> None:
 
         summary = {
             "overall_score": overall,
+            "eval_seeds": EVAL_SEEDS,
             "difficulties": [
                 {
                     "difficulty":   r["difficulty"],
                     "score":        r["score"],
                     "total_reward": round(float(r["total_reward"]), 4),
+                    "episodes": [
+                        {
+                            "episode":      ep["episode"],
+                            "seed":         ep["seed"],
+                            "score":        ep["score"],
+                            "total_reward": round(float(ep["total_reward"]), 4),
+                        }
+                        for ep in r["episodes"]
+                    ],
                 }
                 for r in results
             ],

@@ -11,6 +11,7 @@ All imports resolve because the project root is added to sys.path.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -43,6 +44,29 @@ app = FastAPI(
 # with a threading.Lock() around all mutations in /step and /reset).
 # Acceptable for hackathon single-agent evaluation.
 _env: Optional[FocusEnv] = None
+
+startup_logger = logging.getLogger("app.startup")
+
+
+@app.on_event("startup")
+async def validate_manifest() -> None:
+    """Validate openenv.yaml at startup and log diagnostics."""
+    tasks = _manifest_tasks()
+    if not tasks:
+        startup_logger.warning(
+            "openenv.yaml missing or has no tasks — "
+            "/validate will return valid=False. "
+            "Ensure openenv.yaml exists with at least 3 task entries."
+        )
+    elif len(tasks) < 3:
+        startup_logger.warning(
+            "openenv.yaml has only %d task(s) — need at least 3 "
+            "for /validate to pass.", len(tasks)
+        )
+    else:
+        startup_logger.info(
+            "openenv.yaml loaded — %d tasks found.", len(tasks)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +282,86 @@ def score_difficulty(difficulty: str) -> Dict[str, Any]:
         "total_reward":  round(float(sum(step_rewards)), 4),
         "steps":         len(step_rewards),
         "metrics":       dict(bench_env.metrics),
+    }
+
+
+@app.get("/benchmark")
+def benchmark() -> Dict[str, Any]:
+    """
+    Run a complete smart_agent benchmark across all 3 difficulties.
+    Uses fixed evaluation seeds for reproducibility.
+    Each difficulty runs NUM_EVAL_EPISODES episodes and averages scores.
+    Score is ALWAYS strictly inside (0, 1) — guaranteed by safe_score().
+    """
+    from env import smart_agent
+    from reward_and_tasks import grade_performance
+
+    EVAL_SEEDS = {"easy": [42, 43, 44], "medium": [7, 8, 9], "hard": [13, 14, 15]}
+    NUM_EPISODES = 3
+    MAX_STEPS = 15
+
+    all_results = []
+    combined_metrics = {
+        "completed_tasks": 0, "total_tasks": 0, "on_time": 0,
+        "good_energy_usage": 0, "total_steps": 0, "high_priority_choices": 0,
+    }
+
+    for difficulty in ["easy", "medium", "hard"]:
+        seeds = EVAL_SEEDS[difficulty]
+        episode_scores = []
+        episode_details = []
+
+        for seed in seeds:
+            bench_env = FocusEnv(difficulty=difficulty)
+            obs = bench_env.reset(seed=seed)
+            step_rewards = []
+            final_score = None
+
+            for _ in range(MAX_STEPS):
+                action = smart_agent(obs)
+                obs, reward, done, info = bench_env.step(action)
+                step_rewards.append(reward.reward)
+                if done:
+                    final_score = info.get("score")
+                    break
+
+            if final_score is None:
+                final_score = GRADERS[difficulty](bench_env.metrics)
+
+            episode_scores.append(final_score)
+            episode_details.append({
+                "seed":         seed,
+                "score":        float(final_score),
+                "total_reward": round(float(sum(step_rewards)), 4),
+                "steps":        len(step_rewards),
+            })
+
+            for k in combined_metrics:
+                combined_metrics[k] += bench_env.metrics.get(k, 0)
+
+        avg_score = sum(episode_scores) / len(episode_scores)
+        all_results.append({
+            "difficulty": difficulty,
+            "avg_score":  round(float(avg_score), 6),
+            "episodes":   episode_details,
+        })
+
+    overall = float(grade_performance(combined_metrics))
+
+    return {
+        "overall_score": overall,
+        "eval_seeds":    EVAL_SEEDS,
+        "difficulties":  all_results,
+    }
+
+
+@app.get("/history")
+def history() -> Dict[str, Any]:
+    """Return the last 5 episode trajectories for inspection."""
+    env = _require_env()
+    return {
+        "episode_count": len(env.episode_log),
+        "episodes":      env.episode_log,
     }
 
 
