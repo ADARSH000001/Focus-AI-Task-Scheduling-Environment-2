@@ -85,21 +85,21 @@ Reward is calculated per step and clamped to `[-20, +20]`.
 
 ### 🟢 Easy
 - 2 tasks, high starting energy (80/100)
-- `report` (high priority, deadline 12h, 1h) + `inbox` (low, 18h, 1h)
+- Randomized from task pool by default
 - Scoring: 60% task completion + 40% on-time delivery
 
 ### 🟡 Medium
 - 3 tasks, medium energy (60/100)
-- `pr_review` (high, 11h, 2h) + `client_call` (medium, 14h, 2h) + `docs` (low, 18h, 1h)
+- Requires balancing energy recovery against deadline pressure
 - Scoring: 40% completion + 35% on-time + 25% energy efficiency
 
 ### 🔴 Hard
-- 6 tasks, medium-low energy (55/100)
-- 2 critical blockers (`incident` + `security`) + 4 mixed-priority tasks
-- Requires genuine multi-step planning under resource constraints
+- 6 tasks, low energy (38/100) — already in the `low` band at start
+- Includes critical-priority blockers with tight deadlines
+- Requires genuine multi-step planning under severe resource constraints
 - Scoring: 35% completion + 30% on-time + 20% energy + 15% priority quality
 
-> **Note:** All difficulties use randomized task generation by default (`get_random_task()`), preventing LLMs from memorizing fixed scenarios. Deterministic versions (`get_easy_task()`, etc.) are available for debugging.
+> **Note:** All difficulties use randomized task generation by default (`get_random_task()`), preventing LLMs from memorizing fixed scenarios. Pass a `seed` integer to `reset()` for deterministic episodes.
 
 ---
 
@@ -131,6 +131,8 @@ A built-in deterministic baseline. No API keys required. Follows priority + dead
 ### LLM Agent
 Uses any OpenAI-compatible API. Configured via environment variables. Falls back to smart agent automatically on API errors or invalid outputs.
 
+> Use `--strict-env` to disable the silent fallback and fail loudly if LLM env vars are missing — recommended when you actually want to test LLM performance.
+
 The LLM receives a structured system prompt covering:
 - Energy-first decision rules
 - Priority + deadline sorting strategy
@@ -149,6 +151,8 @@ An episode ends when ANY of these is true:
 4. 5 consecutive invalid or noop steps (stagnation guard)
 
 Maximum steps per episode: **10**
+
+> **Hard difficulty note:** With 6 tasks and a 10-step cap, a perfect episode is not realistically achievable. The hard grader is designed to reward proportional progress, not full completion.
 
 ---
 
@@ -230,10 +234,12 @@ All episode output follows `key=value` format for machine parsing:
 
 ```
 [START] task=easy env=focus_ai model=smart_agent
-[STEP]  step=1 action=start_task('report') reward=22.0000 done=false error=null
+[STEP]  step=1 action=start_task('report') reward=20.0000 done=false error=null
 [STEP]  step=2 action=start_task('inbox') reward=12.0000 done=true error=null
-[END]   task=easy success=true steps=2 score=0.9702 rewards=22.0000,12.0000
+[END]   task=easy success=true steps=2 score=0.9900 rewards=20.0000,12.0000
 ```
+
+> All reward values in logs are clamped to `[-20, +20]` per the reward contract.
 
 ---
 
@@ -266,6 +272,7 @@ All episode output follows `key=value` format for machine parsing:
 ├── Dockerfile              # Container definition
 ├── requirements.txt        # Python dependencies (pip)
 ├── uv.lock                 # Locked dependency tree (uv)
+├── baseline_scores.json    # Reproducible benchmark results (smart agent)
 └── README.md
 ```
 
@@ -280,17 +287,35 @@ All episode output follows `key=value` format for machine parsing:
 
 ---
 
-## 16. Scoring Output
+## 16. Baseline Scores (Smart Agent)
 
-After running all difficulties, results are written to `baseline_scores.json`:
+Results from 3 seeded evaluation episodes per difficulty. Seeds are fixed in `inference.py` (`EVAL_SEEDS`) to ensure reproducibility. Run `python inference.py` to reproduce.
 
 ```json
 {
-  "overall_score": 0.7412,
+  "overall_score": 0.630667,
+  "eval_seeds": {
+    "easy":   [42, 43, 44],
+    "medium": [7,  8,  9 ],
+    "hard":   [13, 14, 15]
+  },
   "difficulties": [
-    { "difficulty": "easy",   "score": 0.9702, "total_reward": 34.0 },
-    { "difficulty": "medium", "score": 0.7105, "total_reward": 21.0 },
-    { "difficulty": "hard",   "score": 0.5429, "total_reward": 12.0 }
+    { "difficulty": "easy",   "score": 0.9900, "total_reward": 111.0 },
+    { "difficulty": "medium", "score": 0.8757, "total_reward": 125.0 },
+    { "difficulty": "hard",   "score": 0.4319, "total_reward":  95.0 }
   ]
 }
 ```
+
+> Hard difficulty scores vary significantly across seeds (0.32–0.61), reflecting genuine scenario difficulty rather than agent inconsistency. This is expected: hard episodes involve tight energy constraints and 6 tasks within a 10-step cap.
+
+Full per-episode breakdown is in `baseline_scores.json`.
+
+---
+
+## 17. Known Limitations
+
+- **Hard difficulty is intentionally near-unsolvable**: 6 tasks + 38 starting energy + 10-step cap means full completion is not realistically achievable. The grader rewards proportional progress.
+- **Task pool is small**: 12 tasks total. Hard difficulty samples 6 of them, so random scenarios can be unbalanced by priority distribution.
+- **No unit tests**: The environment logic is validated via `env.py` self-test and OpenEnv compliance check, but no formal test suite exists.
+- **Python version mismatch risk**: `uv.lock` was generated on Python 3.14; the Dockerfile runs Python 3.10. If you hit import errors in Docker, install from `requirements.txt` directly rather than `uv sync`.
