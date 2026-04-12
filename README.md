@@ -217,6 +217,8 @@ docker build -t focus-ai .
 docker run --rm -p 7860:7860 focus-ai
 ```
 
+> `.dockerignore` is included. It excludes `uv.lock`, `__pycache__/`, `.git/`, and `.md` files from the image, keeping the build lean.
+
 ### Self-test (env only)
 ```bash
 python env.py

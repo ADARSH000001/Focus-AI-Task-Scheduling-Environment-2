@@ -331,7 +331,7 @@ def llm_agent(
         "You are an RL agent. Return ONE action string, nothing else.\n\n"
         "RULES:\n"
         "- NEVER call start_task on a task in the COMPLETED list\n"
-        "- If energy < 30, take_break(2) first unless a HIGH priority deadline will be missed\n"
+        "- If energy <= 40 (energy_level == 'low'), take_break(2) first unless a HIGH priority deadline will be missed\n"
         "- Choose the highest priority pending task within its deadline\n\n"
         f"Time: {observation.time:.1f}h | Energy: {observation.energy}/100 "
         f"({observation.energy_level.upper()})\n\n"
