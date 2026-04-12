@@ -367,7 +367,6 @@ def llm_agent(
 
         logger.warning("LLM returned no valid action (%r) — using smart_agent", reply)
     except Exception as exc:
-        logger.error("LLM error: %s — switching episode to smart_agent", exc)
         raise  # re-raise so run_episode can catch it and set llm_failed = True
 
     return smart_agent(observation)
