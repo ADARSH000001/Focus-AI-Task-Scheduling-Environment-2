@@ -167,7 +167,7 @@ class FocusEnv:
         # ---- Unparseable action ------------------------------------------
         if name == "invalid":
             logger.warning("step | unparseable action: %r", action)
-            return self._penalise(f"Unparseable action: {action!r}")
+            return self._penalise(action, f"Unparseable action: {action!r}")
 
         # Snapshot energy BEFORE state mutation (used for reward shaping)
         energy_before = self._state["energy_level"]
@@ -192,7 +192,7 @@ class FocusEnv:
         # ---- Invalid result (e.g. unknown task id) -----------------------
         if result.get("invalid"):
             logger.warning("step | invalid result for action %r", action)
-            return self._penalise(f"Invalid action: {action!r}")
+            return self._penalise(action, f"Invalid action: {action!r}")
 
         # ---- Stagnation counter ------------------------------------------
         if name == "noop":
@@ -240,6 +240,7 @@ class FocusEnv:
         self._current_trajectory.append({
             "step":    self.metrics["total_steps"],
             "action":  action,
+            "valid":   True,
             "reward":  reward_value,
             "time":    self._state["time"],
             "energy":  self._state["energy"],
@@ -283,7 +284,7 @@ class FocusEnv:
     # Penalty helper  (flat -3, no calculate_reward call)
     # ------------------------------------------------------------------
 
-    def _penalise(self, reason: str) -> Tuple[Observation, Reward, bool, Dict[str, Any]]:
+    def _penalise(self, action: str, reason: str) -> Tuple[Observation, Reward, bool, Dict[str, Any]]:
         """
         Handle invalid actions.
 
@@ -307,7 +308,9 @@ class FocusEnv:
         # Track invalid actions in trajectory too
         self._current_trajectory.append({
             "step":    self.metrics["total_steps"],
-            "action":  f"INVALID({reason})",
+            "action":  action,
+            "valid":   False,
+            "error":   reason,
             "reward":  -3.0,
             "time":    self._state["time"],
             "energy":  self._state["energy"],
@@ -509,18 +512,13 @@ def smart_agent(observation):
     def score_task(t):
         slack = t.deadline - time - t.duration
 
-        # Urgency (less slack = more important)
         urgency_score = max(0, 10 - slack)
-
-        # Priority weight
         priority_score = pri[t.priority] * 15
 
-        # Energy feasibility
         energy_penalty = 0
         if energy < t.duration * 10:
             energy_penalty = -20
 
-        # Deadline violation penalty
         deadline_penalty = 0
         if time + t.duration > t.deadline:
             deadline_penalty = -50
@@ -539,14 +537,26 @@ def smart_agent(observation):
     # -------------------------------
     for t in tasks:
         if t.priority == "high":
-            # If delaying this task risks missing it, do it now
             if time + t.duration >= t.deadline:
-                return f"start_task('{t.id}')"
+                if energy >= t.duration * 10:
+                    # Enough energy — do it now
+                    return f"start_task('{t.id}')"
+                else:
+                    # Not enough energy — try a 1h recovery first
+                    # but only if a break still allows deadline completion
+                    if time + 1 + t.duration <= t.deadline:
+                        return "take_break(1)"
+                    else:
+                        # No time to recover — attempt anyway
+                        # missing deadline is worse than burnout risk
+                        return f"start_task('{t.id}')"
 
     # -------------------------------
     # STEP 3 — ENERGY MANAGEMENT
+    # FIX: threshold raised from 30 to 40 to match numeric_to_level()
+    # definition of "low" energy, catching energy=38 correctly
     # -------------------------------
-    if energy < 30:
+    if energy < 40:
         for t in tasks:
             if t.priority == "high":
                 if time + 2 + t.duration > t.deadline:
@@ -562,7 +572,6 @@ def smart_agent(observation):
         for other in tasks:
             if other.id == task.id:
                 continue
-
             if future_time + other.duration > other.deadline:
                 if other.priority == "high":
                     return False

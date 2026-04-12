@@ -398,9 +398,16 @@ def run_episode(
     total_reward = 0.0
     final_score: Optional[float] = None
 
+    llm_failed = False
+
     for step_n in range(max_steps):
-        if use_llm and client:
-            action = llm_agent(obs, client, config["model_name"], conversation)
+        if use_llm and client and not llm_failed:
+            try:
+                action = llm_agent(obs, client, config["model_name"], conversation)
+            except Exception as exc:
+                logger.error("LLM error: %s — switching episode to smart_agent", exc)
+                llm_failed = True
+                action = smart_agent(obs)
         else:
             action = smart_agent(obs)
 
@@ -493,11 +500,22 @@ def main() -> None:
 
         # Average score across episodes
         avg_score = sum(r["score"] for r in episode_results) / len(episode_results)
+        aggregated_metrics = {
+            key: sum(ep["metrics"].get(key, 0) for ep in episode_results)
+            for key in [
+                "completed_tasks",
+                "total_tasks",
+                "on_time",
+                "good_energy_usage",
+                "total_steps",
+                "high_priority_choices",
+            ]
+        }
         results.append({
             "difficulty":      diff,
             "score":           avg_score,
             "total_reward":    sum(r["total_reward"] for r in episode_results),
-            "metrics":         episode_results[-1]["metrics"],  # last episode metrics
+            "metrics":         aggregated_metrics,
             "episodes":        episode_results,
             "agent":           episode_results[-1]["agent"],
         })
